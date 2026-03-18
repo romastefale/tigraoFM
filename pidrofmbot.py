@@ -23,9 +23,38 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not TOKEN:
     raise ValueError("Configure TELEGRAM_TOKEN nas variáveis do Render")
 
+session = requests.Session()
+cache = {}
 
 # =========================
-# FUNÇÃO DE BUSCA
+# RANKING INTELIGENTE
+# =========================
+
+def score_track(track, query):
+
+    title = track["title"].lower()
+    artist = track["artist"]["name"].lower()
+    q = query.lower()
+
+    score = 0
+
+    if q in f"{title} {artist}":
+        score += 100
+
+    if q in title:
+        score += 60
+
+    if q in artist:
+        score += 40
+
+    if title.startswith(q):
+        score += 30
+
+    return score
+
+
+# =========================
+# BUSCA NA API
 # =========================
 
 def search_deezer(query, index=0):
@@ -33,21 +62,40 @@ def search_deezer(query, index=0):
     query = re.sub(r"[-_]+", " ", query)
     query = re.sub(r"\s+", " ", query).strip()
 
-    r = requests.get(
-        f"https://api.deezer.com/search?q={query}&index={index}",
-        timeout=4
-    )
+    cache_key = f"{query}_{index}"
 
-    if r.status_code != 200:
+    if cache_key in cache:
+        return cache[cache_key]
+
+    try:
+
+        r = session.get(
+            "https://api.deezer.com/search",
+            params={"q": query, "index": index},
+            timeout=3
+        )
+
+        if r.status_code != 200:
+            return []
+
+        tracks = r.json().get("data", [])
+
+        tracks = sorted(
+            tracks,
+            key=lambda t: score_track(t, query),
+            reverse=True
+        )
+
+        cache[cache_key] = tracks
+
+        return tracks
+
+    except:
         return []
-
-    data = r.json()
-
-    return data.get("data", [])
 
 
 # =========================
-# INLINE MODE (@bot musica)
+# INLINE MODE
 # =========================
 
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -82,7 +130,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     title=f"{title} — {artist}",
                     description="Tap to share",
 
-                    caption=f"_{user_name} is listening to..._\n\n♫ Playing: {title}\n★ Artist: {artist}",
+                    caption=f"_{user_name} is listening to..._\n\n*{title}*\n_{artist}_\n\n♫ Now Playing",
                     parse_mode="Markdown"
                 )
             )
@@ -97,7 +145,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# BUSCA DIRETA NO CHAT
+# BUSCA NO CHAT
 # =========================
 
 async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -111,7 +159,7 @@ async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# ENVIA RESULTADOS
+# ENVIAR RESULTADOS
 # =========================
 
 async def send_results(update, context):
@@ -148,16 +196,14 @@ async def send_results(update, context):
         )
     ])
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
     await update.message.reply_text(
         "Select the song:",
-        reply_markup=reply_markup
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
 # =========================
-# LOAD MORE
+# MAIS RESULTADOS
 # =========================
 
 async def more_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -207,7 +253,7 @@ async def more_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# SELECIONAR MÚSICA
+# ESCOLHER MÚSICA
 # =========================
 
 async def select_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -231,7 +277,7 @@ async def select_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.message.reply_photo(
         photo=cover,
-        caption=f"_{user_name} is listening to..._\n\n♫ Playing: {title}\n★ Artist: {artist}",
+        caption=f"_{user_name} is listening to..._\n\n*{title}*\n_{artist}_\n\n♫ Now Playing",
         parse_mode="Markdown"
     )
 
