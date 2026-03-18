@@ -176,7 +176,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                     caption=(
                         f"♬ {user_name} is listening to...\n\n"
-                        f"♫ *{title}* ({album}) — _{artist}_"
+                        f"♫ *{title}* - _{album}_ — _{artist}_"
                     ),
                     parse_mode="Markdown"
                 )
