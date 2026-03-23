@@ -175,8 +175,8 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     description="♪ Share this song",
 
                     caption=(
-                        f"♬ {user_name} is listening to...\n\n"
-                        f"♫ *{title}* - _{album}_ — _{artist}_"
+                        f"♫ {user_name} is listening to...\n\n"
+                        f"♬ *{title}* - _{album}_ — _{artist}_"
                     ),
                     parse_mode="Markdown"
                 )
@@ -320,8 +320,8 @@ async def select_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await cb_query.message.reply_photo(
         photo=cover,
         caption=(
-            f"♬ {user_name} is listening to...\n\n"
-            f"♫ *{title}* ({album}) — _{artist}_"
+            f"♫ {user_name} is listening to...\n\n"
+            f"♬ *{title}* - _{album} — {artist}_"
         ),
         parse_mode="Markdown"
     )
