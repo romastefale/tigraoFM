@@ -2,6 +2,7 @@ import os
 import re
 import html
 import time
+import json
 import logging
 import asyncio
 from typing import Any, Dict, Optional
@@ -39,6 +40,7 @@ logger = logging.getLogger("bot")
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 REDIS_URL = os.getenv("REDIS_URL")
+ADMIN_ID = os.getenv("ADMIN_ID")
 
 session = requests.Session()
 
@@ -53,9 +55,6 @@ if REDIS_URL:
         redis_client = redis.Redis.from_url(
             REDIS_URL,
             decode_responses=True,
-            socket_timeout=5,
-            socket_connect_timeout=5,
-            health_check_interval=30,
         )
         redis_client.ping()
         logger.info("Redis conectado ✅")
@@ -66,39 +65,12 @@ else:
     logger.warning("REDIS_URL não definida")
 
 # =========================
-# CACHE
-# =========================
-
-CACHE: Dict[str, Dict[str, Any]] = {}
-CACHE_TTL = 60
-
-
-def get_cache(key: str):
-    data = CACHE.get(key)
-    if not data:
-        return None
-
-    if time.time() - data["time"] > CACHE_TTL:
-        del CACHE[key]
-        return None
-
-    return data["value"]
-
-
-def set_cache(key: str, value):
-    CACHE[key] = {
-        "value": value,
-        "time": time.time()
-    }
-
-# =========================
 # SANITIZE
 # =========================
 
 FORBIDDEN = re.compile(
     r'[\u0600-\u06FF\u0400-\u04FF\u4E00-\u9FFF\u0900-\u097F\u0980-\u09FF]'
 )
-
 
 def sanitize(text: Any) -> str:
     if not text:
@@ -107,7 +79,6 @@ def sanitize(text: Any) -> str:
     if not FORBIDDEN.search(text):
         return text
     return "Unknown"
-
 
 def esc(text: Any) -> str:
     return html.escape(sanitize(text))
@@ -119,31 +90,17 @@ def esc(text: Any) -> str:
 def register_play(user_id: int, track_id: int) -> int:
     if not redis_client:
         return 0
-
-    try:
-        return int(redis_client.incr(f"plays:{user_id}:{track_id}"))
-    except Exception as e:
-        logger.error("Erro Redis INCR: %s", e)
-        return 0
-
+    return int(redis_client.incr(f"plays:{user_id}:{track_id}"))
 
 def get_user_stats(user_id: int):
     if not redis_client:
         return []
 
     data = []
-
-    try:
-        for k in redis_client.scan_iter(match=f"plays:{user_id}:*"):
-            try:
-                count = int(redis_client.get(k) or 0)
-                track_id = k.split(":")[-1]
-                data.append((track_id, count))
-            except:
-                continue
-    except Exception as e:
-        logger.error("Erro Redis SCAN: %s", e)
-        return []
+    for k in redis_client.scan_iter(match=f"plays:{user_id}:*"):
+        count = int(redis_client.get(k) or 0)
+        track_id = k.split(":")[-1]
+        data.append((track_id, count))
 
     data.sort(key=lambda x: x[1], reverse=True)
     return data[:10]
@@ -152,174 +109,180 @@ def get_user_stats(user_id: int):
 # DEEZER
 # =========================
 
-def deezer_search_sync(query: str):
-    cache = get_cache(query)
-    if cache:
-        return cache
-
+async def deezer_search(query: str):
     try:
-        r = session.get(
+        r = await asyncio.to_thread(
+            session.get,
             "https://api.deezer.com/search",
             params={"q": query},
-            timeout=8
         )
-        r.raise_for_status()
-        data = r.json().get("data", [])
-        set_cache(query, data)
-        return data
-    except Exception as e:
-        logger.error("Erro Deezer: %s", e)
+        return r.json().get("data", [])
+    except:
         return []
-
-
-async def deezer_search(query: str):
-    return await asyncio.to_thread(deezer_search_sync, query)
-
 
 async def deezer_track(track_id: str):
     try:
         r = await asyncio.to_thread(
             session.get,
-            f"https://api.deezer.com/track/{track_id}",
-            timeout=8
+            f"https://api.deezer.com/track/{track_id}"
         )
-        r.raise_for_status()
         return r.json()
-    except Exception as e:
-        logger.error(f"Erro Deezer track: {e}")
+    except:
         return None
 
 # =========================
-# START
+# BACKUP DIÁRIO
+# =========================
+
+async def backup_redis(context: ContextTypes.DEFAULT_TYPE):
+    if not redis_client or not ADMIN_ID:
+        return
+
+    try:
+        data = {}
+        for key in redis_client.scan_iter("plays:*"):
+            data[key] = int(redis_client.get(key) or 0)
+
+        filename = "backup.json"
+
+        with open(filename, "w") as f:
+            json.dump(data, f)
+
+        await context.bot.send_document(
+            chat_id=int(ADMIN_ID),
+            document=open(filename, "rb"),
+            caption="📦 Backup diário Redis"
+        )
+
+        os.remove(filename)
+
+    except Exception as e:
+        await context.bot.send_message(
+            chat_id=int(ADMIN_ID),
+            text=f"🚨 ERRO BACKUP:\n{e}"
+        )
+
+# =========================
+# EXPORT STATS
+# =========================
+
+async def export_stats(context: ContextTypes.DEFAULT_TYPE):
+    if not redis_client or not ADMIN_ID:
+        return
+
+    try:
+        stats = {}
+
+        for key in redis_client.scan_iter("plays:*"):
+            _, user_id, track_id = key.split(":")
+            count = int(redis_client.get(key) or 0)
+
+            stats.setdefault(user_id, {})
+            stats[user_id][track_id] = count
+
+        filename = "stats.json"
+
+        with open(filename, "w") as f:
+            json.dump(stats, f, indent=2)
+
+        await context.bot.send_document(
+            chat_id=int(ADMIN_ID),
+            document=open(filename, "rb"),
+            caption="📊 Stats diário"
+        )
+
+        os.remove(filename)
+
+    except Exception as e:
+        await context.bot.send_message(
+            chat_id=int(ADMIN_ID),
+            text=f"🚨 ERRO STATS:\n{e}"
+        )
+
+# =========================
+# MONITOR REDIS (1h)
+# =========================
+
+async def monitor_redis(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not redis_client:
+            raise Exception("Redis não conectado")
+        redis_client.ping()
+    except Exception as e:
+        if ADMIN_ID:
+            await context.bot.send_message(
+                chat_id=int(ADMIN_ID),
+                text=f"🚨 Redis OFFLINE!\n{e}"
+            )
+
+# =========================
+# BOT
 # =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 Envie uma música ou use @tigraoFMbot nome")
-
-# =========================
-# CHAT SEARCH
-# =========================
+    await update.message.reply_text("Envie música ou use @bot")
 
 async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.message.text.strip()
-    tracks = await deezer_search(query)
+    tracks = await deezer_search(update.message.text)
 
-    if not tracks:
-        await update.message.reply_text("Nada encontrado.")
-        return
-
-    track_map = {}
     keyboard = []
+    context.chat_data["tracks"] = {}
 
     for t in tracks[:5]:
         track_id = str(t["id"])
-        track_map[track_id] = t
+        context.chat_data["tracks"][track_id] = t
 
         keyboard.append([
             InlineKeyboardButton(
-                f"{sanitize(t['title'])} — {sanitize(t['artist']['name'])}",
+                f"{t['title']} — {t['artist']['name']}",
                 callback_data=f"play:{track_id}"
             )
         ])
-
-    context.chat_data["track_map"] = track_map
 
     await update.message.reply_text(
         "Escolha:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-# =========================
-# CLICK
-# =========================
-
 async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cb = update.callback_query
     await cb.answer()
 
     track_id = cb.data.split(":")[1]
-    t = context.chat_data.get("track_map", {}).get(track_id)
-
-    if not t:
-        await cb.answer("Refaça a busca", show_alert=True)
-        return
+    t = context.chat_data["tracks"][track_id]
 
     count = register_play(cb.from_user.id, int(track_id))
 
-    caption = (
-        f"🎹 {esc(cb.from_user.first_name)} está ouvindo...\n"
-        f"🎧 <b>{esc(t['title'])}</b>\n"
-        f"🎤 <i>{esc(t['artist']['name'])}</i>\n"
-        f"<i>🔁 {count} Plays </i>"
-    )
-
     await cb.message.reply_photo(
         photo=t["album"]["cover_big"],
-        caption=caption,
-        parse_mode=ParseMode.HTML
+        caption=f"{t['title']} — {t['artist']['name']}\n🔁 {count} Plays"
     )
 
-# =========================
-# INLINE
-# =========================
-
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = (update.inline_query.query or "").strip()
+    tracks = await deezer_search(update.inline_query.query)
 
-    if not query:
-        return
-
-    tracks = await deezer_search(query)
     results = []
-
     for t in tracks[:10]:
         results.append(
             InlineQueryResultPhoto(
                 id=str(t["id"]),
                 photo_url=t["album"]["cover_big"],
                 thumbnail_url=t["album"]["cover_small"],
-                caption=(
-                    f"🎹 {esc(update.inline_query.from_user.first_name)} está ouvindo...\n"
-                    f"🎧 <b>{esc(t['title'])}</b>\n"
-                    f"🎤 <i>{esc(t['artist']['name'])}</i>\n"
-                    f"<i>🔁 0 Plays </i>"
-                ),
-                parse_mode=ParseMode.HTML
+                caption=f"{t['title']} — {t['artist']['name']}\n🔁 0 Plays"
             )
         )
 
-    await update.inline_query.answer(results, cache_time=2, is_personal=True)
-
-# =========================
-# INLINE SELECT
-# =========================
+    await update.inline_query.answer(results)
 
 async def chosen_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = update.chosen_inline_result
-
-    track_id = int(data.result_id)
-    user_id = data.from_user.id
-
-    count = register_play(user_id, track_id)
-
-    logger.info(f"INLINE PLAY | user={user_id} track={track_id} total={count}")
-
-# =========================
-# STATS (BONITO + GRUPO)
-# =========================
+    register_play(
+        update.chosen_inline_result.from_user.id,
+        int(update.chosen_inline_result.result_id)
+    )
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-
     user = update.effective_user
-    user_id = user.id
-
-    data = get_user_stats(user_id)
-
-    if not data:
-        await update.message.reply_text("Nenhuma música ainda.")
-        return
+    data = get_user_stats(user.id)
 
     text = "📊 Suas mais ouvidas:\n\n"
 
@@ -327,16 +290,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         track = await deezer_track(track_id)
 
         if track:
-            title = esc(track.get("title"))
-            artist = esc(track.get("artist", {}).get("name"))
-        else:
-            title = f"ID {track_id}"
-            artist = "Desconhecido"
-
-        text += (
-            f"{i}. 🎧 {title} — {artist}\n"
-            f"   🔁 {count} Plays\n\n"
-        )
+            text += f"{i}. 🎧 {track['title']} — {track['artist']['name']}\n   🔁 {count} Plays\n\n"
 
     await update.message.reply_text(text)
 
@@ -353,6 +307,13 @@ def main():
     app.add_handler(CallbackQueryHandler(click))
     app.add_handler(InlineQueryHandler(inline_query))
     app.add_handler(ChosenInlineResultHandler(chosen_inline))
+
+    job_queue = app.job_queue
+
+    # 🔥 AGENDAMENTOS
+    job_queue.run_repeating(monitor_redis, interval=3600, first=60)
+    job_queue.run_repeating(backup_redis, interval=86400, first=120)
+    job_queue.run_repeating(export_stats, interval=86400, first=180)
 
     logger.info("BOT ONLINE 🚀")
     app.run_polling()
