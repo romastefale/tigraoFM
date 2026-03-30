@@ -713,6 +713,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_id = update.effective_user.id
+    user_first_name = update.effective_user.first_name
     entries: List[Tuple[str, float]] = redis_client.zrevrange(
         f"top:user:{user_id}",
         0,
@@ -740,8 +741,9 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"   <i>🔁 {int(score)} Plays</i>")
         lines.append("")
 
-    await update.message.reply_text(
-        "\n".join(lines).strip(),
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="\n".join(lines).strip(),
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True
     )
@@ -782,8 +784,9 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"   <i>🔁 {int(score)} Plays</i>")
         lines.append("")
 
-    await update.message.reply_text(
-        "\n".join(lines).strip(),
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="\n".join(lines).strip(),
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True
     )
