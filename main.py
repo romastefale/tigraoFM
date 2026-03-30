@@ -217,7 +217,7 @@ async def handle_log_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             pass
 
         await cb_query.message.reply_text(
-            "📝Qual texto de <i>Update</i> você deseja enviar?",
+            "📝 Qual texto de <i>Update</i> você deseja enviar?",
             parse_mode=ParseMode.HTML
         )
         return
@@ -338,10 +338,10 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     description="♪ Share this song",
 
                     caption=(
-                        f"♫ {user_name} is listening to...\n\n"
-                        f"♬ *{title}* - _{album}_ — _{artist}_"
+                        f"![♫](tg://emoji?id=5388632425314140043) {user_name} está ouvindo\\.\\.\\.\n\n"
+                        f"![♬](tg://emoji?id=5463107823946717464) *{title}* \\- _{album}_ — _{artist}_"
                     ),
-                    parse_mode="Markdown"
+                    parse_mode="MarkdownV2"
                 )
             )
 
@@ -409,7 +409,7 @@ async def send_results(update, context):
     ])
 
     await update.message.reply_text(
-        "♪ Search song...",
+        "Procure...",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -485,10 +485,10 @@ async def select_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await cb_query.message.reply_photo(
         photo=cover,
         caption=(
-            f"♫ {user_name} is listening to...\n\n"
-            f"♬ *{title}* - _{album} — {artist}_"
+            f"![♫](tg://emoji?id=5388632425314140043) {user_name} está ouvindo\\.\\.\\.\n\n"
+            f"![♬](tg://emoji?id=5463107823946717464) *{title}* \\- _{album}_ — _{artist}_"
         ),
-        parse_mode="Markdown"
+        parse_mode="MarkdownV2"
     )
 
 
