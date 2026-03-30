@@ -184,9 +184,9 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     t = tracks[i]
 
     caption = (
-        f"🎧 {esc(cb.from_user.first_name)} está ouvindo...\n\n"
-        f"🎵 <b>{esc(t['title'])}</b>\n"
-        f"<i>{esc(t['artist']['name'])}</i>"
+        f"🎹 {esc(cb.from_user.first_name)} está ouvindo...\n\n"
+        f"🎧 <b>{esc(t['title'])}</b>\n"
+        f"🎤 <i>{esc(t['artist']['name'])}</i>"
     )
 
     await cb.message.reply_photo(
