@@ -21,11 +21,17 @@ from telegram.ext import (
     filters
 )
 
-logging.basicConfig(level=logging.INFO)
+# =========================
+# CONFIGURAÇÕES BÁSICAS
+# =========================
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").rstrip("/") 
 PORT = int(os.getenv("PORT", 8443))
 
 session = requests.Session()
@@ -34,29 +40,29 @@ _executor = ThreadPoolExecutor(max_workers=4)
 cache = {}
 CACHE_MAX_SIZE = 300
 
-
 # =========================
-# UTIL
+# FUNÇÕES DE UTILIDADE
 # =========================
-
 def escape_html(text):
     return html.escape(str(text)) if text else ""
 
-
 def sanitize_text(text):
-    return text or "Unknown"
-
+    return text or "Desconhecido"
 
 def evict_cache():
     if len(cache) >= CACHE_MAX_SIZE:
         for k in list(cache.keys())[:50]:
             del cache[k]
 
+def build_caption(title, artist, album, user_name):
+    return (
+        f"🎧 {user_name} está ouvindo...\n\n"
+        f"🎵 <b>{title}</b> - <i>{album}</i> — <i>{artist}</i>"
+    )
 
 # =========================
-# DEEZER
+# INTEGRAÇÃO DEEZER
 # =========================
-
 def _search_deezer_sync(query, index=0):
     query = re.sub(r"\s+", " ", query).strip()
     key = f"{query}_{index}"
@@ -75,176 +81,165 @@ def _search_deezer_sync(query, index=0):
             return []
 
         data = r.json().get("data", [])
-
         evict_cache()
         cache[key] = data
-
         return data
 
     except Exception as e:
         logger.error(f"Erro Deezer: {e}")
         return []
 
-
 async def search_deezer(query, index=0):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_executor, _search_deezer_sync, query, index)
 
-
 # =========================
-# INLINE
+# MODO INLINE (@seu_bot query)
 # =========================
-
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.inline_query.query
     if not query:
         return
 
     tracks = await search_deezer(query)
-
-    user = update.inline_query.from_user
-    user_name = escape_html(user.first_name if user else "Alguém")
-
+    user_name = escape_html(update.inline_query.from_user.first_name or "Alguém")
     results = []
 
     for i, track in enumerate(tracks[:10]):
         try:
-            title = escape_html(sanitize_text(track["title"]))
-            artist = escape_html(sanitize_text(track["artist"]["name"]))
-            album = escape_html(sanitize_text(track["album"]["title"]))
-            cover = track["album"]["cover_big"]
+            title = escape_html(sanitize_text(track.get("title")))
+            artist = escape_html(sanitize_text(track.get("artist", {}).get("name")))
+            album = escape_html(sanitize_text(track.get("album", {}).get("title")))
+            cover = track.get("album", {}).get("cover_big", "")
+            track_id = str(track.get("id", i))
+
+            caption_text = build_caption(title, artist, album, user_name)
 
             results.append(
                 InlineQueryResultPhoto(
-                    id=str(i),
+                    id=track_id,
                     photo_url=cover,
                     thumbnail_url=cover,
-                    title=f"{track['title']} — {track['artist']['name']}",
-                    description="Compartilhar música",
-                    caption=(
-                        f"<a href='tg://emoji?id=5388632425314140043'>🎧</a> {user_name} está ouvindo...<br><br>"
-                        f"<a href='tg://emoji?id=5463107823946717464'>🎵</a> <b>{title}</b> - <i>{album}</i> — <i>{artist}</i>"
-                    ),
+                    title=f"{title} — {artist}",
+                    description=album,
+                    caption=caption_text,
                     parse_mode="HTML"
                 )
             )
         except Exception as e:
-            logger.warning(f"Erro inline item: {e}")
+            logger.warning(f"Erro item inline: {e}")
             continue
 
     await update.inline_query.answer(results, cache_time=5)
 
-
 # =========================
-# BUSCA CHAT
+# MODO CHAT (Mensagem Direta)
 # =========================
-
 async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.message.text
+    if not update.message or not update.message.text:
+        return
 
+    query = update.message.text
     context.user_data["query"] = query
     context.user_data["offset"] = 0
 
-    await send_results(update.message, context)
+    await send_results(update.message, context, is_edit=False)
 
-
-async def send_results(message, context):
+async def send_results(message, context, is_edit=False):
     query = context.user_data.get("query")
     offset = context.user_data.get("offset", 0)
+
+    if not query:
+        text = "Sessão expirada. Por favor, digite o nome da música novamente."
+        if is_edit:
+            await message.edit_text(text)
+        else:
+            await message.reply_text(text)
+        return
 
     tracks = await search_deezer(query, offset)
 
     if not tracks:
-        await message.reply_text("Nenhum resultado.")
+        text = "Nenhum resultado encontrado."
+        if is_edit:
+            await message.edit_text(text)
+        else:
+            await message.reply_text(text)
         return
 
     context.user_data["tracks"] = tracks
 
     keyboard = []
     for i, track in enumerate(tracks[:10]):
-        title = sanitize_text(track["title"])
-        artist = sanitize_text(track["artist"]["name"])
+        title = sanitize_text(track.get("title"))
+        artist = sanitize_text(track.get("artist", {}).get("name"))
+        keyboard.append([InlineKeyboardButton(f"{title} — {artist}", callback_data=f"track_{i}")])
 
-        keyboard.append([
-            InlineKeyboardButton(
-                f"{title} — {artist}",
-                callback_data=f"track_{i}"
-            )
-        ])
+    if len(tracks) == 10:
+        keyboard.append([InlineKeyboardButton("Mais", callback_data="more")])
 
-    keyboard.append([
-        InlineKeyboardButton("Mais", callback_data="more")
-    ])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    text = "🔎 Escolha uma música:"
 
-    await message.reply_text(
-        "🔎 Escolha uma música:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
+    if is_edit:
+        await message.edit_text(text, reply_markup=reply_markup)
+    else:
+        await message.reply_text(text, reply_markup=reply_markup)
 
 # =========================
-# MAIS
+# CALLBACKS (Botões)
 # =========================
-
 async def more_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cb = update.callback_query
     await cb.answer()
 
     context.user_data["offset"] = context.user_data.get("offset", 0) + 10
-
-    await send_results(cb.message, context)
-
-
-# =========================
-# SELECT TRACK (CORRIGIDO)
-# =========================
+    await send_results(cb.message, context, is_edit=True)
 
 async def select_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cb = update.callback_query
-    await cb.answer()
-
+    
     try:
         index = int(cb.data.split("_")[1])
-    except:
-        await cb.answer("Erro.", show_alert=True)
+    except ValueError:
+        await cb.answer("Erro no botão.", show_alert=True)
         return
 
     tracks = context.user_data.get("tracks")
 
-    # 🔥 CORREÇÃO PRINCIPAL
     if not tracks or index >= len(tracks):
-        await cb.answer("Resultado expirado. Busque novamente.", show_alert=True)
+        await cb.answer("Busca expirada. Digite o nome da música novamente.", show_alert=True)
         return
 
     track = tracks[index]
 
     try:
-        title = escape_html(sanitize_text(track["title"]))
-        artist = escape_html(sanitize_text(track["artist"]["name"]))
-        album = escape_html(sanitize_text(track["album"]["title"]))
-        cover = track["album"]["cover_big"]
-
+        title = escape_html(sanitize_text(track.get("title")))
+        artist = escape_html(sanitize_text(track.get("artist", {}).get("name")))
+        album = escape_html(sanitize_text(track.get("album", {}).get("title")))
+        cover = track.get("album", {}).get("cover_big", "")
         user_name = escape_html(cb.from_user.first_name)
 
+        caption_text = build_caption(title, artist, album, user_name)
+
+        await cb.answer()
         await cb.message.reply_photo(
             photo=cover,
-            caption=(
-                f"<a href='tg://emoji?id=5388632425314140043'>🎧</a> {user_name} está ouvindo...<br><br>"
-                f"<a href='tg://emoji?id=5463107823946717464'>🎵</a> <b>{title}</b> - <i>{album}</i> — <i>{artist}</i>"
-            ),
+            caption=caption_text,
             parse_mode="HTML"
         )
-
     except Exception as e:
         logger.error(f"Erro ao enviar música: {e}")
-        await cb.answer("Erro ao enviar música.", show_alert=True)
-
+        await cb.answer("Falha ao enviar a música.", show_alert=True)
 
 # =========================
-# MAIN
+# MAIN / INICIALIZAÇÃO
 # =========================
-
 def main():
+    if not TOKEN:
+        logger.error("TELEGRAM_TOKEN não configurado!")
+        return
+
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(InlineQueryHandler(inline_query))
@@ -261,9 +256,7 @@ def main():
             drop_pending_updates=True,
         )
     else:
-        app.run_polling(drop_pending_updates=True)
-
+        logger.error("WEBHOOK_URL não configurada. Fechando...")
 
 if __name__ == "__main__":
     main()
-    
