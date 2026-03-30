@@ -35,7 +35,7 @@ from telegram.ext import (
 # =========================
 
 BOT_USERNAME = "@tigraoFMbot"
-BOT_DISPLAY_NAME = "Tigrão FM"
+BOT_DISPLAY_NAME = "tigraoFM"
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 REDIS_URL = os.getenv("REDIS_URL")
@@ -407,7 +407,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎧 Digite o nome de uma música ou use <code>{BOT_USERNAME} nome</code>\n\n"
         f"📌 Comandos:\n"
         f"/charts — suas músicas mais ouvidas\n"
-        f"/top — ranking global"
+        f"/top — ranking global\n"
+        f"/play – enviar uma música pelo grupo"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -726,7 +727,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     metas = await asyncio.gather(*(fetch_track_meta(track_id) for track_id, _ in entries))
 
     lines = [
-        f"📊 <b>Suas mais ouvidas no {BOT_DISPLAY_NAME}</b>",
+        f"📊 <b>Músicas mais ouvidas de {esc(user_first_name)} no {BOT_DISPLAY_NAME}</b>",
         ""
     ]
 
