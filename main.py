@@ -48,6 +48,63 @@ CACHE_MAX_SIZE = 500
 _executor = ThreadPoolExecutor(max_workers=4)
 
 
+# =========================
+# FUNÇÕES DE HIGIENIZAÇÃO (NOVAS REGRAS)
+# =========================
+
+def sanitize_text(text):
+    """
+    Verifica se há alfabetos proibidos. Tenta traduzir para o inglês.
+    Se falhar, omite (remove) os caracteres proibidos.
+    """
+    if not text:
+        return text
+
+    text = str(text)
+
+    # Regex cobrindo blocos Unicode do Árabe, Cirílico, Chinês, Hindi (Devanagari) e Bengali
+    forbidden_pattern = re.compile(
+        r'['
+        r'\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF' # Árabe
+        r'\u0400-\u04FF\u0500-\u052F\u2DE0-\u2DFF\uA640-\uA69F'               # Cirílico
+        r'\u4E00-\u9FFF\u3400-\u4DBF'                                         # Chinês
+        r'\u0900-\u097F'                                                       # Hindi (Devanagari)
+        r'\u0980-\u09FF'                                                       # Bengali
+        r']'
+    )
+
+    # Se não encontrar nenhum caractere proibido, retorna o texto original rapidamente
+    if not forbidden_pattern.search(text):
+        return text
+
+    # 1. Tentar traduzir para o Inglês usando API gratuita do Google
+    try:
+        url = "https://translate.googleapis.com/translate_a/single"
+        params = {
+            "client": "gtx",
+            "sl": "auto",
+            "tl": "en",
+            "dt": "t",
+            "q": text
+        }
+        response = session.get(url, params=params, timeout=3)
+        if response.status_code == 200:
+            data = response.json()
+            translated_text = "".join([sentence[0] for sentence in data[0]])
+            
+            # Se a tradução não contiver mais os caracteres proibidos, deu sucesso
+            if not forbidden_pattern.search(translated_text):
+                return translated_text
+    except Exception as e:
+        logger.warning(f"Falha na tradução automática, aplicando omissão: {e}")
+
+    # 2. Se a tradução falhar ou não resolver, omitir os caracteres proibidos
+    sanitized = forbidden_pattern.sub("", text)
+    sanitized = re.sub(r'\s+', ' ', sanitized).strip() # Limpa espaços duplos
+    
+    return sanitized if sanitized else "Unknown"
+
+
 def escape_markdown(text):
     return re.sub(r"([_*`\[])", r"\\\1", str(text))
 
@@ -151,17 +208,18 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tracks = await search_deezer(query)
 
     user = update.inline_query.from_user
-    user_name = escape_markdown(user.first_name if user else "Someone")
+    # Higieniza e depois escapa o nome do usuário
+    user_name = escape_markdown(sanitize_text(user.first_name if user else "Someone"))
 
     results = []
 
     for i, track in enumerate(tracks[:10]):
 
         try:
-
-            title = escape_markdown(track["title"])
-            artist = escape_markdown(track["artist"]["name"])
-            album = escape_markdown(track["album"]["title"])
+            # Higieniza e escapa os dados da música
+            title = escape_markdown(sanitize_text(track["title"]))
+            artist = escape_markdown(sanitize_text(track["artist"]["name"]))
+            album = escape_markdown(sanitize_text(track["album"]["title"]))
             cover = track["album"]["cover_big"]
 
             results.append(
@@ -171,7 +229,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     photo_url=cover,
                     thumbnail_url=cover,
 
-                    title=f"{track['title']} — {track['artist']['name']}",
+                    title=f"{sanitize_text(track['title'])} — {sanitize_text(track['artist']['name'])}",
                     description="♪ Share this song",
 
                     caption=(
@@ -226,8 +284,9 @@ async def send_results(update, context):
 
     for i, track in enumerate(tracks[:10]):
 
-        title = track["title"]
-        artist = track["artist"]["name"]
+        # Higieniza os botões
+        title = sanitize_text(track["title"])
+        artist = sanitize_text(track["artist"]["name"])
 
         keyboard.append([
             InlineKeyboardButton(
@@ -273,8 +332,9 @@ async def more_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for i, track in enumerate(tracks[:10]):
 
-        title = track["title"]
-        artist = track["artist"]["name"]
+        # Higieniza os botões do "Load more"
+        title = sanitize_text(track["title"])
+        artist = sanitize_text(track["artist"]["name"])
 
         keyboard.append([
             InlineKeyboardButton(
@@ -310,12 +370,14 @@ async def select_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     track = tracks[index]
 
-    title = escape_markdown(track["title"])
-    artist = escape_markdown(track["artist"]["name"])
-    album = escape_markdown(track["album"]["title"])
+    # Higieniza e escapa os dados finais da música selecionada
+    title = escape_markdown(sanitize_text(track["title"]))
+    artist = escape_markdown(sanitize_text(track["artist"]["name"]))
+    album = escape_markdown(sanitize_text(track["album"]["title"]))
     cover = track["album"]["cover_big"]
 
-    user_name = escape_markdown(cb_query.from_user.first_name)
+    # Higieniza o nome do usuário
+    user_name = escape_markdown(sanitize_text(cb_query.from_user.first_name))
 
     await cb_query.message.reply_photo(
         photo=cover,
