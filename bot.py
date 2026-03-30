@@ -727,7 +727,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     metas = await asyncio.gather(*(fetch_track_meta(track_id) for track_id, _ in entries))
 
     lines = [
-        f"📊 <b>Músicas mais ouvidas de {esc(user_first_name)} no {BOT_DISPLAY_NAME}</b>",
+        f"📊 <b>Músicas mais ouvidas de {esc(user_first_name or 'Usuário')} no {BOT_DISPLAY_NAME}</b>",
         ""
     ]
 
