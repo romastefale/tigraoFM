@@ -404,7 +404,7 @@ async def export_stats_to_disk() -> Optional[str]:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         f"🎶 <b>{BOT_DISPLAY_NAME}</b>\n"
-        f"🎧 Digite o nome de uma música ou use <code>{BOT_USERNAME} nome</code>\n\n"
+        f"🎧 Digite o nome de uma música ou use <code><a href=\"https://t.me/tigraoFMbot?start=inline\">@tigraoFMbot</a> nome</code>\n\n"
         f"📌 Comandos:\n"
         f"/charts — suas músicas mais ouvidas\n"
         f"/top — ranking global"
@@ -490,7 +490,7 @@ async def group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         PENDING_REPLIES[key] = now
         await msg.reply_text(
             "🎧Responda aqui o nome de uma música ou use "
-            f"{BOT_USERNAME} para pesquisar <i>inline</i>",
+            f"<a href=\"https://t.me/tigraoFMbot?start=inline\">@tigraoFMbot</a> para pesquisar <i>inline</i>",
             parse_mode=ParseMode.HTML
         )
         return
@@ -519,7 +519,7 @@ async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(
             "🎧Responda aqui o nome de uma música ou use "
-            f"{BOT_USERNAME} para pesquisar <i>inline</i>",
+            f"<a href=\"https://t.me/tigraoFMbot?start=inline\">@tigraoFMbot</a> para pesquisar <i>inline</i>",
             parse_mode=ParseMode.HTML
         )
         return
@@ -584,7 +584,7 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cb.answer("🔄 Refaça a busca.", show_alert=True)
         return
 
-    count = register_play(cb.from_user.id, t)
+    count = register_play(cb.fromuser.id, t)
 
     caption = build_caption(
         title=t.get("title"),
