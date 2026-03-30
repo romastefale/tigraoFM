@@ -4,7 +4,7 @@ import html
 import time
 import logging
 import asyncio
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 import requests
 from telegram import (
@@ -12,6 +12,7 @@ from telegram import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     InlineQueryResultArticle,
+    InlineQueryResultPhoto,  # ✅ ADICIONADO
     InputTextMessageContent
 )
 from telegram.constants import ParseMode
@@ -180,7 +181,6 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     i = int(cb.data)
-
     t = tracks[i]
 
     caption = (
@@ -196,11 +196,11 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # =========================
-# INLINE MODE
+# INLINE MODE (CORRIGIDO)
 # =========================
 
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.inline_query.query.strip()
+    query = (update.inline_query.query or "").strip()
 
     if not query:
         return
@@ -210,22 +210,53 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     results = []
 
     for i, t in enumerate(tracks[:10]):
-        title = sanitize(t["title"])
-        artist = sanitize(t["artist"]["name"])
+        try:
+            title = sanitize(t.get("title"))
+            artist = sanitize(t.get("artist", {}).get("name"))
+            cover_big = t.get("album", {}).get("cover_big")
+            cover_small = t.get("album", {}).get("cover_small")
 
-        text = f"🎧 {title} - {artist}"
+            if not cover_big:
+                continue
 
+            caption = (
+                f"🎹 Usuário está ouvindo...\n"
+                f"🎧 <b>{esc(title)}</b>\n"
+                f"🎤 <i>{esc(artist)}</i>"
+            )
+
+            results.append(
+                InlineQueryResultPhoto(
+                    id=f"{i}_{t.get('id')}_{int(time.time())}",
+                    photo_url=cover_big,
+                    thumbnail_url=cover_small or cover_big,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                    title=f"{title} — {artist}",
+                    description="Enviar música"
+                )
+            )
+
+        except Exception as e:
+            logger.error(f"Erro inline item: {e}")
+
+    if not results:
         results.append(
-            InlineQueryResultArticle(
-                id=str(i),
-                title=f"{title} — {artist}",
-                input_message_content=InputTextMessageContent(text),
-                description="Enviar música",
-                thumb_url=t["album"]["cover_small"]
+            InlineQueryResultPhoto(
+                id="empty",
+                photo_url="https://via.placeholder.com/300",
+                thumbnail_url="https://via.placeholder.com/100",
+                caption="Nada encontrado.",
+                title="Sem resultados",
+                description="Tente outro termo"
             )
         )
 
-    await update.inline_query.answer(results, cache_time=1)
+    await update.inline_query.answer(
+        results,
+        cache_time=2,
+        is_personal=True
+    )
 
 # =========================
 # ERROR HANDLER
