@@ -456,7 +456,7 @@ async def more_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
 
     await cb_query.message.reply_text(
-        "♪ Search song...",
+        "Buscar...",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
