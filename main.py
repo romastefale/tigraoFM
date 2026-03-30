@@ -409,7 +409,7 @@ async def send_results(update, context):
     ])
 
     await update.message.reply_text(
-        "Procure...",
+        "🔍Procure...",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
