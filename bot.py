@@ -180,7 +180,7 @@ async def deezer_search(query: str):
 # =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Envie uma música ou use @seubot nome")
+    await update.message.reply_text("🔍 Envie uma música ou use @tigraoFMbot nome")
 
 # =========================
 # CHAT SEARCH
