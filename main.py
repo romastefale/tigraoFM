@@ -13,12 +13,13 @@ from telegram import (
     InlineKeyboardMarkup,
     InlineKeyboardButton
 )
-
+from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     InlineQueryHandler,
     MessageHandler,
     CallbackQueryHandler,
+    CommandHandler,
     ContextTypes,
     filters
 )
@@ -32,6 +33,13 @@ logger = logging.getLogger(__name__)
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", TOKEN.replace(":", "")[:20] if TOKEN else None)
+
+ADMIN_ID_RAW = os.getenv("ADMIN_ID")
+try:
+    ADMIN_ID = int(ADMIN_ID_RAW) if ADMIN_ID_RAW else None
+except ValueError:
+    logger.warning("Invalid ADMIN_ID value, bot will run without admin restriction.")
+    ADMIN_ID = None
 
 try:
     PORT = int(os.getenv("PORT", 8443))
@@ -65,11 +73,11 @@ def sanitize_text(text):
     # Regex cobrindo blocos Unicode do Árabe, Cirílico, Chinês, Hindi (Devanagari) e Bengali
     forbidden_pattern = re.compile(
         r'['
-        r'\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF' # Árabe
+        r'\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF'  # Árabe
         r'\u0400-\u04FF\u0500-\u052F\u2DE0-\u2DFF\uA640-\uA69F'               # Cirílico
         r'\u4E00-\u9FFF\u3400-\u4DBF'                                         # Chinês
-        r'\u0900-\u097F'                                                       # Hindi (Devanagari)
-        r'\u0980-\u09FF'                                                       # Bengali
+        r'\u0900-\u097F'                                                      # Hindi (Devanagari)
+        r'\u0980-\u09FF'                                                      # Bengali
         r']'
     )
 
@@ -91,7 +99,7 @@ def sanitize_text(text):
         if response.status_code == 200:
             data = response.json()
             translated_text = "".join([sentence[0] for sentence in data[0]])
-            
+
             # Se a tradução não contiver mais os caracteres proibidos, deu sucesso
             if not forbidden_pattern.search(translated_text):
                 return translated_text
@@ -100,8 +108,8 @@ def sanitize_text(text):
 
     # 2. Se a tradução falhar ou não resolver, omitir os caracteres proibidos
     sanitized = forbidden_pattern.sub("", text)
-    sanitized = re.sub(r'\s+', ' ', sanitized).strip() # Limpa espaços duplos
-    
+    sanitized = re.sub(r'\s+', ' ', sanitized).strip()  # Limpa espaços duplos
+
     return sanitized if sanitized else "Unknown"
 
 
@@ -114,6 +122,108 @@ def evict_cache():
         oldest_keys = list(cache.keys())[:100]
         for k in oldest_keys:
             del cache[k]
+
+
+def is_admin(user_id: int | None) -> bool:
+    return ADMIN_ID is not None and user_id == ADMIN_ID
+
+
+async def send_log_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.effective_message.reply_text(
+        "📝Qual texto de <i>Update</i> você deseja enviar?",
+        parse_mode=ParseMode.HTML
+    )
+
+
+# =========================
+# COMANDO /LOG
+# =========================
+
+async def start_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id if update.effective_user else None
+
+    if not is_admin(user_id):
+        await update.effective_message.reply_text("Sem permissão.")
+        return
+
+    context.user_data["awaiting_log"] = True
+    await send_log_prompt(update, context)
+
+
+async def handle_log_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("awaiting_log"):
+        return
+
+    user_id = update.effective_user.id if update.effective_user else None
+    if not is_admin(user_id):
+        return
+
+    msg = update.effective_message
+    if not msg:
+        return
+
+    try:
+        # Reenvia exatamente o que foi enviado, preservando texto, formatação e anexos
+        await context.bot.copy_message(
+            chat_id=msg.chat_id,
+            from_chat_id=msg.chat_id,
+            message_id=msg.message_id
+        )
+    except Exception as e:
+        logger.exception(f"Falha ao copiar mensagem no /log: {e}")
+        await msg.reply_text("Falha ao reproduzir a mensagem.")
+        context.user_data["awaiting_log"] = False
+        return
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🆗Correto?", callback_data="log_ok"),
+            InlineKeyboardButton("✏️Editar...", callback_data="log_edit")
+        ]
+    ])
+
+    await msg.reply_text(
+        "🆗Correto?",
+        reply_markup=keyboard
+    )
+
+    # Aguarda a confirmação; se editar, o fluxo volta ao início
+    context.user_data["awaiting_log"] = False
+
+
+async def handle_log_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cb_query = update.callback_query
+    if not cb_query:
+        return
+
+    user_id = cb_query.from_user.id if cb_query.from_user else None
+    if not is_admin(user_id):
+        await cb_query.answer("Sem permissão.", show_alert=True)
+        return
+
+    data = cb_query.data
+
+    if data == "log_ok":
+        context.user_data.pop("awaiting_log", None)
+        await cb_query.answer("Concluído.")
+        try:
+            await cb_query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return
+
+    if data == "log_edit":
+        context.user_data["awaiting_log"] = True
+        await cb_query.answer("Envie novamente o texto.")
+        try:
+            await cb_query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await cb_query.message.reply_text(
+            "📝Qual texto de <i>Update</i> você deseja enviar?",
+            parse_mode=ParseMode.HTML
+        )
+        return
 
 
 # =========================
@@ -251,6 +361,8 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 
 async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get("awaiting_log"):
+        return
 
     query = update.message.text
 
@@ -401,10 +513,17 @@ def main():
         .build()
     )
 
+    app.add_handler(CommandHandler("log", start_log))
     app.add_handler(InlineQueryHandler(inline_query))
+    app.add_handler(CallbackQueryHandler(handle_log_callback, pattern=r"^log_(ok|edit)$"))
 
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, search_music)
+    )
+
+    app.add_handler(
+        MessageHandler(filters.ALL & ~filters.COMMAND, handle_log_input),
+        group=1
     )
 
     app.add_handler(
