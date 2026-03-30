@@ -1,12 +1,10 @@
-# =========================
-# IMPORTS
-# =========================
 import os
 import re
 import html
 import json
 import logging
 import asyncio
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, List, Tuple
@@ -45,6 +43,13 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 BACKUP_PATH = os.getenv("BACKUP_PATH", "/tmp")
 
 session = requests.Session()
+
+# =========================
+# ESTADO (NOVO)
+# =========================
+
+PENDING_REPLIES: Dict[int, float] = {}
+REPLY_TIMEOUT = 900  # 15 minutos
 
 # =========================
 # LOGGING
@@ -100,7 +105,7 @@ def connect_redis() -> None:
 connect_redis()
 
 # =========================
-# SANITIZE / TRADUÇÃO
+# SANITIZE
 # =========================
 
 FORBIDDEN = re.compile(
@@ -226,42 +231,97 @@ async def deezer_search(query: str):
         return []
 
 # =========================
-# /PLAY (NOVO)
+# SEARCH (AJUSTADO)
 # =========================
 
-async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = " ".join(context.args).strip()
+async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    chat_type = update.effective_chat.type
+    user_id = update.effective_user.id
+
+    now = time.time()
+
+    # limpar expirados
+    expired = [uid for uid, ts in PENDING_REPLIES.items() if now - ts > REPLY_TIMEOUT]
+    for uid in expired:
+        PENDING_REPLIES.pop(uid, None)
+
+    if chat_type in ["group", "supergroup"]:
+        text = (message.text or "").strip()
+
+        is_command = text.startswith("/play")
+        is_mention = BOT_USERNAME.lower() in text.lower()
+
+        is_reply = (
+            message.reply_to_message
+            and message.reply_to_message.from_user
+            and message.reply_to_message.from_user.username
+            and f"@{message.reply_to_message.from_user.username}".lower() == BOT_USERNAME.lower()
+        )
+
+        if is_command or is_mention:
+            PENDING_REPLIES[user_id] = now
+            await message.reply_text(
+                "🎧 Responda aqui o nome de uma música ou use "
+                f"{BOT_USERNAME} para pesquisar <i>inline</i>",
+                parse_mode=ParseMode.HTML
+            )
+            return
+
+        if is_reply and user_id in PENDING_REPLIES:
+            if now - PENDING_REPLIES[user_id] > REPLY_TIMEOUT:
+                PENDING_REPLIES.pop(user_id, None)
+                await message.reply_text("⏱️ Tempo expirado. Use /play novamente.")
+                return
+
+            PENDING_REPLIES.pop(user_id, None)
+            query = text
+        else:
+            return
+    else:
+        query = (message.text or "").strip()
 
     if not query:
-        await update.message.reply_text("🎤 Use: /play nome da música")
+        await message.reply_text("🎤 Digite o nome de uma música.")
         return
 
     tracks = await deezer_search(query)
 
     if not tracks:
-        await update.message.reply_text("🔎 Nada encontrado.")
+        await message.reply_text("🔎 Nada encontrado.")
         return
 
     keyboard = []
-
     for t in tracks[:5]:
         track_id = str(t["id"])
         remember_track(t)
 
-        title = sanitize(t.get("title"))
-        artist = sanitize((t.get("artist") or {}).get("name"))
-
         keyboard.append([
             InlineKeyboardButton(
-                f"🎵 {title} — {artist}",
+                f"🎵 {sanitize(t.get('title'))} — {sanitize((t.get('artist') or {}).get('name'))}",
                 callback_data=f"play:{track_id}"
             )
         ])
 
-    await update.message.reply_text(
-        "🎧 Escolha:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await message.reply_text("🎧 Escolha:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+# =========================
+# /PLAY
+# =========================
+
+async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type in ["group", "supergroup"]:
+        user_id = update.effective_user.id
+        PENDING_REPLIES[user_id] = time.time()
+
+        await update.message.reply_text(
+            "🎧 Responda aqui o nome de uma música ou use "
+            f"{BOT_USERNAME} para pesquisar <i>inline</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    await search_music(update, context)
 
 # =========================
 # MAIN
@@ -271,13 +331,12 @@ def main():
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("play", play))  # NOVO
+    app.add_handler(CommandHandler("play", play))
     app.add_handler(CommandHandler("charts", stats))
     app.add_handler(CommandHandler("top", top))
     app.add_handler(CommandHandler("log", log_cmd))
 
-    # REMOVIDO: MessageHandler de texto
-
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_music))
     app.add_handler(CallbackQueryHandler(click))
     app.add_handler(InlineQueryHandler(inline_query))
     app.add_handler(ChosenInlineResultHandler(chosen_inline))
