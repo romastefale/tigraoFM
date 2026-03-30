@@ -4,7 +4,7 @@ import html
 import time
 import logging
 import asyncio
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import requests
 import redis
@@ -21,6 +21,7 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     InlineQueryHandler,
+    ChosenInlineResultHandler,
     CommandHandler,
     ContextTypes,
     filters,
@@ -41,19 +42,38 @@ REDIS_URL = os.getenv("REDIS_URL")
 
 session = requests.Session()
 
-redis_client = redis.Redis.from_url(
-    REDIS_URL,
-    decode_responses=True
-) if REDIS_URL else None
+# =========================
+# REDIS INIT
+# =========================
+
+redis_client: Optional[redis.Redis] = None
+
+if REDIS_URL:
+    try:
+        redis_client = redis.Redis.from_url(
+            REDIS_URL,
+            decode_responses=True,
+            socket_timeout=5,
+            socket_connect_timeout=5,
+            health_check_interval=30,
+        )
+        redis_client.ping()
+        logger.info("Redis conectado ✅")
+    except Exception as e:
+        logger.warning("Redis OFF: %s", e)
+        redis_client = None
+else:
+    logger.warning("REDIS_URL não definida")
 
 # =========================
 # CACHE
 # =========================
 
-CACHE: Dict[str, Dict] = {}
+CACHE: Dict[str, Dict[str, Any]] = {}
 CACHE_TTL = 60
 
-def get_cache(key):
+
+def get_cache(key: str):
     data = CACHE.get(key)
     if not data:
         return None
@@ -64,7 +84,8 @@ def get_cache(key):
 
     return data["value"]
 
-def set_cache(key, value):
+
+def set_cache(key: str, value):
     CACHE[key] = {
         "value": value,
         "time": time.time()
@@ -78,6 +99,7 @@ FORBIDDEN = re.compile(
     r'[\u0600-\u06FF\u0400-\u04FF\u4E00-\u9FFF\u0900-\u097F\u0980-\u09FF]'
 )
 
+
 def sanitize(text: Any) -> str:
     if not text:
         return "Unknown"
@@ -86,7 +108,8 @@ def sanitize(text: Any) -> str:
         return text
     return "Unknown"
 
-def esc(text):
+
+def esc(text: Any) -> str:
     return html.escape(sanitize(text))
 
 # =========================
@@ -97,21 +120,30 @@ def register_play(user_id: int, track_id: int) -> int:
     if not redis_client:
         return 0
 
-    key = f"plays:{user_id}:{track_id}"
-    count = redis_client.incr(key)
-    return count
+    try:
+        return int(redis_client.incr(f"plays:{user_id}:{track_id}"))
+    except Exception as e:
+        logger.error("Erro Redis INCR: %s", e)
+        return 0
+
 
 def get_user_stats(user_id: int):
     if not redis_client:
         return []
 
-    keys = redis_client.keys(f"plays:{user_id}:*")
     data = []
 
-    for k in keys:
-        count = int(redis_client.get(k))
-        track_id = k.split(":")[-1]
-        data.append((track_id, count))
+    try:
+        for k in redis_client.scan_iter(match=f"plays:{user_id}:*"):
+            try:
+                count = int(redis_client.get(k) or 0)
+                track_id = k.split(":")[-1]
+                data.append((track_id, count))
+            except:
+                continue
+    except Exception as e:
+        logger.error("Erro Redis SCAN: %s", e)
+        return []
 
     data.sort(key=lambda x: x[1], reverse=True)
     return data[:10]
@@ -129,13 +161,16 @@ def deezer_search_sync(query: str):
         r = session.get(
             "https://api.deezer.com/search",
             params={"q": query},
-            timeout=6
+            timeout=8
         )
+        r.raise_for_status()
         data = r.json().get("data", [])
         set_cache(query, data)
         return data
-    except:
+    except Exception as e:
+        logger.error("Erro Deezer: %s", e)
         return []
+
 
 async def deezer_search(query: str):
     return await asyncio.to_thread(deezer_search_sync, query)
@@ -145,10 +180,10 @@ async def deezer_search(query: str):
 # =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍Envie uma música ou use @tigraofm nome")
+    await update.message.reply_text("Envie uma música ou use @seubot nome")
 
 # =========================
-# SEARCH CHAT
+# CHAT SEARCH
 # =========================
 
 async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -159,16 +194,21 @@ async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Nada encontrado.")
         return
 
-    context.chat_data["tracks"] = tracks
-
+    track_map = {}
     keyboard = []
-    for i, t in enumerate(tracks[:5]):
+
+    for t in tracks[:5]:
+        track_id = str(t["id"])
+        track_map[track_id] = t
+
         keyboard.append([
             InlineKeyboardButton(
                 f"{sanitize(t['title'])} — {sanitize(t['artist']['name'])}",
-                callback_data=str(i)
+                callback_data=f"play:{track_id}"
             )
         ])
+
+    context.chat_data["track_map"] = track_map
 
     await update.message.reply_text(
         "Escolha:",
@@ -176,22 +216,21 @@ async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # =========================
-# CLICK CHAT
+# CLICK
 # =========================
 
 async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cb = update.callback_query
     await cb.answer()
 
-    tracks = context.chat_data.get("tracks")
+    track_id = cb.data.split(":")[1]
+    t = context.chat_data.get("track_map", {}).get(track_id)
 
-    if not tracks:
-        await cb.answer("Refaça.", show_alert=True)
+    if not t:
+        await cb.answer("Refaça a busca", show_alert=True)
         return
 
-    t = tracks[int(cb.data)]
-
-    count = register_play(cb.from_user.id, t["id"])
+    count = register_play(cb.from_user.id, int(track_id))
 
     caption = (
         f"🎹 {esc(cb.from_user.first_name)} está ouvindo...\n"
@@ -220,53 +259,45 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     results = []
 
     for i, t in enumerate(tracks[:10]):
-        try:
-            title = sanitize(t["title"])
-            artist = sanitize(t["artist"]["name"])
-            cover_big = t["album"]["cover_big"]
-            cover_small = t["album"]["cover_small"]
+        result_id = f"{t['id']}"
 
-            if not cover_big:
-                continue
-
-            user = update.inline_query.from_user
-            count = register_play(user.id, t["id"])
-
-            caption = (
-                f"🎹 {esc(user.first_name)} está ouvindo...\n"
-                f"🎧 <b>{esc(title)}</b>\n"
-                f"🎤 <i>{esc(artist)}</i>\n"
-                f"<i>🔁 {count} Plays </i>"
+        results.append(
+            InlineQueryResultPhoto(
+                id=result_id,
+                photo_url=t["album"]["cover_big"],
+                thumbnail_url=t["album"]["cover_small"],
+                caption=(
+                    f"🎹 {esc(update.inline_query.from_user.first_name)} está ouvindo...\n"
+                    f"🎧 <b>{esc(t['title'])}</b>\n"
+                    f"🎤 <i>{esc(t['artist']['name'])}</i>\n"
+                    f"<i>🔁 0 Plays </i>"
+                ),
+                parse_mode=ParseMode.HTML
             )
+        )
 
-            results.append(
-                InlineQueryResultPhoto(
-                    id=f"{i}_{t['id']}_{int(time.time())}",
-                    photo_url=cover_big,
-                    thumbnail_url=cover_small or cover_big,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML,
-                    title=f"{title} — {artist}",
-                    description="Enviar música"
-                )
-            )
+    await update.inline_query.answer(results, cache_time=2, is_personal=True)
 
-        except Exception as e:
-            logger.error(e)
+# =========================
+# INLINE SELECT
+# =========================
 
-    await update.inline_query.answer(
-        results,
-        cache_time=2,
-        is_personal=True
-    )
+async def chosen_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = update.chosen_inline_result
+
+    track_id = int(data.result_id)
+    user_id = data.from_user.id
+
+    count = register_play(user_id, track_id)
+
+    logger.info(f"INLINE PLAY | user={user_id} track={track_id} total={count}")
 
 # =========================
 # STATS
 # =========================
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    data = get_user_stats(user_id)
+    data = get_user_stats(update.message.from_user.id)
 
     if not data:
         await update.message.reply_text("Nenhuma música ainda.")
@@ -280,20 +311,10 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 # =========================
-# ERROR
-# =========================
-
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error("Erro:", exc_info=context.error)
-
-# =========================
 # MAIN
 # =========================
 
 def main():
-    if not TOKEN:
-        raise RuntimeError("TELEGRAM_TOKEN não definido")
-
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -301,7 +322,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_music))
     app.add_handler(CallbackQueryHandler(click))
     app.add_handler(InlineQueryHandler(inline_query))
-    app.add_error_handler(error_handler)
+    app.add_handler(ChosenInlineResultHandler(chosen_inline))
 
     logger.info("BOT ONLINE 🚀")
     app.run_polling()
