@@ -7,13 +7,13 @@ import asyncio
 from typing import Any, Dict
 
 import requests
+import redis
+
 from telegram import (
     Update,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    InlineQueryResultArticle,
-    InlineQueryResultPhoto,  # ✅ ADICIONADO
-    InputTextMessageContent
+    InlineQueryResultPhoto,
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -27,7 +27,7 @@ from telegram.ext import (
 )
 
 # =========================
-# LOGGING AVANÇADO (Railway)
+# LOGGING
 # =========================
 
 logging.basicConfig(
@@ -37,15 +37,21 @@ logging.basicConfig(
 logger = logging.getLogger("bot")
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
+REDIS_URL = os.getenv("REDIS_URL")
 
 session = requests.Session()
 
+redis_client = redis.Redis.from_url(
+    REDIS_URL,
+    decode_responses=True
+) if REDIS_URL else None
+
 # =========================
-# CACHE (TTL)
+# CACHE
 # =========================
 
 CACHE: Dict[str, Dict] = {}
-CACHE_TTL = 60  # segundos
+CACHE_TTL = 60
 
 def get_cache(key):
     data = CACHE.get(key)
@@ -65,53 +71,58 @@ def set_cache(key, value):
     }
 
 # =========================
-# SANITIZE + TRADUÇÃO
+# SANITIZE
 # =========================
 
 FORBIDDEN = re.compile(
     r'[\u0600-\u06FF\u0400-\u04FF\u4E00-\u9FFF\u0900-\u097F\u0980-\u09FF]'
 )
 
-def translate_sync(text: str) -> str:
-    try:
-        r = session.get(
-            "https://translate.googleapis.com/translate_a/single",
-            params={
-                "client": "gtx",
-                "sl": "auto",
-                "tl": "en",
-                "dt": "t",
-                "q": text
-            },
-            timeout=4
-        )
-        data = r.json()
-        return "[en: " + "".join(x[0] for x in data[0]) + "]"
-    except:
-        return "Unknown"
-
 def sanitize(text: Any) -> str:
     if not text:
         return "Unknown"
-
     text = str(text)
-
     if not FORBIDDEN.search(text):
         return text
-
-    return translate_sync(text)
+    return "Unknown"
 
 def esc(text):
     return html.escape(sanitize(text))
 
 # =========================
-# DEEZER SEARCH + CACHE
+# REDIS COUNTER
+# =========================
+
+def register_play(user_id: int, track_id: int) -> int:
+    if not redis_client:
+        return 0
+
+    key = f"plays:{user_id}:{track_id}"
+    count = redis_client.incr(key)
+    return count
+
+def get_user_stats(user_id: int):
+    if not redis_client:
+        return []
+
+    keys = redis_client.keys(f"plays:{user_id}:*")
+    data = []
+
+    for k in keys:
+        count = int(redis_client.get(k))
+        track_id = k.split(":")[-1]
+        data.append((track_id, count))
+
+    data.sort(key=lambda x: x[1], reverse=True)
+    return data[:10]
+
+# =========================
+# DEEZER
 # =========================
 
 def deezer_search_sync(query: str):
     cache = get_cache(query)
     if cache:
-        logger.info(f"CACHE HIT: {query}")
         return cache
 
     try:
@@ -122,7 +133,6 @@ def deezer_search_sync(query: str):
         )
         data = r.json().get("data", [])
         set_cache(query, data)
-        logger.info(f"API HIT: {query}")
         return data
     except:
         return []
@@ -138,12 +148,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Envie uma música ou use @seubot nome")
 
 # =========================
-# BUSCA NORMAL
+# SEARCH CHAT
 # =========================
 
 async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.message.text.strip()
-
     tracks = await deezer_search(query)
 
     if not tracks:
@@ -167,7 +176,7 @@ async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # =========================
-# CLICK
+# CLICK CHAT
 # =========================
 
 async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -180,13 +189,15 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cb.answer("Refaça.", show_alert=True)
         return
 
-    i = int(cb.data)
-    t = tracks[i]
+    t = tracks[int(cb.data)]
+
+    count = register_play(cb.from_user.id, t["id"])
 
     caption = (
         f"🎹 {esc(cb.from_user.first_name)} está ouvindo...\n"
         f"🎧 <b>{esc(t['title'])}</b>\n"
-        f"🎤 <i>{esc(t['artist']['name'])}</i>"
+        f"🎤 <i>{esc(t['artist']['name'])}</i>\n"
+        f"<i>🔁 {count} Plays </i>"
     )
 
     await cb.message.reply_photo(
@@ -196,7 +207,7 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # =========================
-# INLINE MODE (CORRIGIDO)
+# INLINE
 # =========================
 
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -206,28 +217,31 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     tracks = await deezer_search(query)
-
     results = []
 
     for i, t in enumerate(tracks[:10]):
         try:
-            title = sanitize(t.get("title"))
-            artist = sanitize(t.get("artist", {}).get("name"))
-            cover_big = t.get("album", {}).get("cover_big")
-            cover_small = t.get("album", {}).get("cover_small")
+            title = sanitize(t["title"])
+            artist = sanitize(t["artist"]["name"])
+            cover_big = t["album"]["cover_big"]
+            cover_small = t["album"]["cover_small"]
 
             if not cover_big:
                 continue
 
+            user = update.inline_query.from_user
+            count = register_play(user.id, t["id"])
+
             caption = (
-                f"🎹 Usuário está ouvindo...\n"
+                f"🎹 {esc(user.first_name)} está ouvindo...\n"
                 f"🎧 <b>{esc(title)}</b>\n"
-                f"🎤 <i>{esc(artist)}</i>"
+                f"🎤 <i>{esc(artist)}</i>\n"
+                f"<i>🔁 {count} Plays </i>"
             )
 
             results.append(
                 InlineQueryResultPhoto(
-                    id=f"{i}_{t.get('id')}_{int(time.time())}",
+                    id=f"{i}_{t['id']}_{int(time.time())}",
                     photo_url=cover_big,
                     thumbnail_url=cover_small or cover_big,
                     caption=caption,
@@ -238,19 +252,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         except Exception as e:
-            logger.error(f"Erro inline item: {e}")
-
-    if not results:
-        results.append(
-            InlineQueryResultPhoto(
-                id="empty",
-                photo_url="https://via.placeholder.com/300",
-                thumbnail_url="https://via.placeholder.com/100",
-                caption="Nada encontrado.",
-                title="Sem resultados",
-                description="Tente outro termo"
-            )
-        )
+            logger.error(e)
 
     await update.inline_query.answer(
         results,
@@ -259,11 +261,30 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # =========================
-# ERROR HANDLER
+# STATS
+# =========================
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    data = get_user_stats(user_id)
+
+    if not data:
+        await update.message.reply_text("Nenhuma música ainda.")
+        return
+
+    text = "📊 Suas mais ouvidas:\n\n"
+
+    for i, (track_id, count) in enumerate(data, 1):
+        text += f"{i}. ID {track_id} — {count} plays\n"
+
+    await update.message.reply_text(text)
+
+# =========================
+# ERROR
 # =========================
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error("ERRO:", exc_info=context.error)
+    logger.error("Erro:", exc_info=context.error)
 
 # =========================
 # MAIN
@@ -276,13 +297,13 @@ def main():
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stats", stats))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_music))
     app.add_handler(CallbackQueryHandler(click))
     app.add_handler(InlineQueryHandler(inline_query))
     app.add_error_handler(error_handler)
 
     logger.info("BOT ONLINE 🚀")
-
     app.run_polling()
 
 if __name__ == "__main__":
