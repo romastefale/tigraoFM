@@ -251,8 +251,8 @@ async def deezer_track(track_id: str):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         f"🎶 <b>{BOT_DISPLAY_NAME}</b>\n"
-        f"Digite o nome de uma música ou use <code>{BOT_USERNAME} nome</code>\n\n"
-        f"Comandos:\n"
+        f"🎧 Digite o nome de uma música ou use <code>{BOT_USERNAME} nome</code>\n\n"
+        f"📌 Comandos:\n"
         f"/stats — suas músicas mais ouvidas\n"
         f"/top — ranking global"
     )
@@ -265,13 +265,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = (update.message.text or "").strip()
     if not query:
-        await update.message.reply_text("Digite o nome de uma música.")
+        await update.message.reply_text("🎤 Digite o nome de uma música.")
         return
 
     tracks = await deezer_search(query)
 
     if not tracks:
-        await update.message.reply_text("Nada encontrado.")
+        await update.message.reply_text("🔎 Nada encontrado.")
         return
 
     context.chat_data["tracks"] = {}
@@ -288,7 +288,7 @@ async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             keyboard.append([
                 InlineKeyboardButton(
-                    f"{title} — {artist}",
+                    f"🎵 {title} — {artist}",
                     callback_data=f"play:{track_id}"
                 )
             ])
@@ -296,7 +296,7 @@ async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.warning("Erro montando botão: %s", e)
 
     await update.message.reply_text(
-        "Escolha:",
+        "🎧 Escolha:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -311,14 +311,14 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         track_id = cb.data.split(":", 1)[1]
     except Exception:
-        await cb.answer("Ação inválida.", show_alert=True)
+        await cb.answer("⚠️ Ação inválida.", show_alert=True)
         return
 
     tracks = context.chat_data.get("tracks") or {}
     t = tracks.get(track_id)
 
     if not t:
-        await cb.answer("Refaça a busca.", show_alert=True)
+        await cb.answer("🔄 Refaça a busca.", show_alert=True)
         return
 
     count = register_play(cb.from_user.id, t)
@@ -428,7 +428,7 @@ async def chosen_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not redis_client:
-        await update.message.reply_text("Redis indisponível.")
+        await update.message.reply_text("⚠️ Redis indisponível.")
         return
 
     user_id = update.effective_user.id
@@ -440,7 +440,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     if not entries:
-        await update.message.reply_text("Você ainda não ouviu músicas.")
+        await update.message.reply_text("🎧 Você ainda não ouviu músicas.")
         return
 
     metas = await asyncio.gather(*(fetch_track_meta(track_id) for track_id, _ in entries))
@@ -467,7 +467,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not redis_client:
-        await update.message.reply_text("Redis indisponível.")
+        await update.message.reply_text("⚠️ Redis indisponível.")
         return
 
     entries: List[Tuple[str, float]] = redis_client.zrevrange(
@@ -478,7 +478,7 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     if not entries:
-        await update.message.reply_text("Ainda não há plays registrados.")
+        await update.message.reply_text("🎧 Ainda não há plays registrados.")
         return
 
     metas = await asyncio.gather(*(fetch_track_meta(track_id) for track_id, _ in entries))
