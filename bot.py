@@ -175,6 +175,20 @@ def deezer_search_sync(query: str):
 async def deezer_search(query: str):
     return await asyncio.to_thread(deezer_search_sync, query)
 
+
+async def deezer_track(track_id: str):
+    try:
+        r = await asyncio.to_thread(
+            session.get,
+            f"https://api.deezer.com/track/{track_id}",
+            timeout=8
+        )
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        logger.error(f"Erro Deezer track: {e}")
+        return None
+
 # =========================
 # START
 # =========================
@@ -258,12 +272,10 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tracks = await deezer_search(query)
     results = []
 
-    for i, t in enumerate(tracks[:10]):
-        result_id = f"{t['id']}"
-
+    for t in tracks[:10]:
         results.append(
             InlineQueryResultPhoto(
-                id=result_id,
+                id=str(t["id"]),
                 photo_url=t["album"]["cover_big"],
                 thumbnail_url=t["album"]["cover_small"],
                 caption=(
@@ -293,11 +305,17 @@ async def chosen_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"INLINE PLAY | user={user_id} track={track_id} total={count}")
 
 # =========================
-# STATS
+# STATS (BONITO + GRUPO)
 # =========================
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = get_user_stats(update.message.from_user.id)
+    if not update.message:
+        return
+
+    user = update.effective_user
+    user_id = user.id
+
+    data = get_user_stats(user_id)
 
     if not data:
         await update.message.reply_text("Nenhuma música ainda.")
@@ -306,7 +324,19 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "📊 Suas mais ouvidas:\n\n"
 
     for i, (track_id, count) in enumerate(data, 1):
-        text += f"{i}. ID {track_id} — {count} plays\n"
+        track = await deezer_track(track_id)
+
+        if track:
+            title = esc(track.get("title"))
+            artist = esc(track.get("artist", {}).get("name"))
+        else:
+            title = f"ID {track_id}"
+            artist = "Desconhecido"
+
+        text += (
+            f"{i}. 🎧 {title} — {artist}\n"
+            f"   🔁 {count} Plays\n\n"
+        )
 
     await update.message.reply_text(text)
 
