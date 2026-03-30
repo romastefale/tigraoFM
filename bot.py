@@ -398,7 +398,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎶 <b>{BOT_DISPLAY_NAME}</b>\n"
         f"🎧 Digite o nome de uma música ou use <code>{BOT_USERNAME} nome</code>\n\n"
         f"📌 Comandos:\n"
-        f"/stats — suas músicas mais ouvidas\n"
+        f"/charts — suas músicas mais ouvidas\n"
         f"/top — ranking global"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
@@ -587,7 +587,7 @@ async def chosen_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning("Erro no chosen_inline: %s", e)
 
 # =========================
-# STATS / TOP
+# STATS (AGORA /CHARTS)
 # =========================
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -628,6 +628,10 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True
     )
+
+# =========================
+# TOP
+# =========================
 
 async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not redis_client:
@@ -760,7 +764,7 @@ def main():
     )
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("charts", stats))  # ALTERADO AQUI
     app.add_handler(CommandHandler("top", top))
     app.add_handler(CommandHandler("log", log_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_music))
