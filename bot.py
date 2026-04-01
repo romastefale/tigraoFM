@@ -5,14 +5,14 @@ import json
 import logging
 import asyncio
 import time
+import io
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, List, Tuple
 
 import requests
 import redis
-import cv2
-import numpy as np
+from PIL import Image
 
 from telegram import (
     Update,
@@ -59,8 +59,6 @@ REPLY_TIMEOUT = 900  # 15 minutos
 # =========================
 STORY_SIZE = (1080, 1920)
 STORY_FRONT_RATIO = 0.70
-STORY_MIN_COVER_SIZE = 600
-STORY_TARGET_COVER_SIZE = 1400
 
 # =========================
 # LOGGING
@@ -160,25 +158,8 @@ def esc(text: Any) -> str:
     return html.escape(sanitize(text))
 
 # =========================
-# PROCESSAMENTO DE IMAGEM (OPENCV)
+# PROCESSAMENTO DE IMAGEM (PROXY CDN - ANTI-BLOCK)
 # =========================
-
-def _unique_nonempty(values: List[str]) -> List[str]:
-    seen = set()
-    out = []
-    for value in values:
-        value = (value or "").strip()
-        if value and value not in seen:
-            seen.add(value)
-            out.append(value)
-    return out
-
-def _promote_deezer_cover_url(url: str, size: int) -> str:
-    if not url:
-        return url
-    promoted = re.sub(r"/\d+x\d+-", f"/{size}x{size}-", url, count=1)
-    promoted = re.sub(r"size=(small|medium|big|xl)", f"size={size}x{size}", promoted, flags=re.I)
-    return promoted
 
 def _cover_candidates(track: Dict[str, Any]) -> List[str]:
     album = track.get("album") or {}
@@ -186,29 +167,9 @@ def _cover_candidates(track: Dict[str, Any]) -> List[str]:
         album.get("cover_xl"),
         album.get("cover_big"),
         album.get("cover_medium"),
-        album.get("cover_small"),
-        album.get("cover"),
     ]
-
-    candidates: List[str] = []
-    for url in _unique_nonempty([str(u) for u in urls if u]):
-        candidates.append(url)
-        candidates.append(_promote_deezer_cover_url(url, STORY_TARGET_COVER_SIZE))
-        candidates.append(_promote_deezer_cover_url(url, 1000))
-        candidates.append(_promote_deezer_cover_url(url, STORY_MIN_COVER_SIZE))
-
-    return _unique_nonempty(candidates)
-
-def _download_image_bytes(url: str) -> Optional[bytes]:
-    try:
-        r = requests.get(url, timeout=10)
-        r.raise_for_status()
-        if not r.content:
-            return None
-        return r.content
-    except Exception as e:
-        logger.warning("Falha ao baixar capa %s: %s", url, e)
-        return None
+    # Retorna apenas as não vazias
+    return [str(u) for u in urls if u]
 
 def _render_story_image(track: Dict[str, Any]) -> Optional[bytes]:
     cover_url = None
@@ -220,46 +181,39 @@ def _render_story_image(track: Dict[str, Any]) -> Optional[bytes]:
     if not cover_url:
         return None
 
-    data = _download_image_bytes(cover_url)
-    if not data:
-        return None
+    bg_w, bg_h = STORY_SIZE # 1080x1920
+    fg_size = int(bg_w * STORY_FRONT_RATIO) # 756x756
 
     try:
-        nparr = np.frombuffer(data, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        # MAGIA 1: Pedimos o Fundo para o Proxy global, já redimensionado e com BLUR de fábrica.
+        # Bypass completo do bloqueio IP do Deezer e zero uso de CPU.
+        bg_proxy_url = f"https://wsrv.nl/?url={cover_url}&w={bg_w}&h={bg_h}&fit=cover&blur=50&output=jpg&q=90"
+        r_bg = requests.get(bg_proxy_url, timeout=15)
+        r_bg.raise_for_status()
         
-        if img is None:
-            logger.error("OpenCV não conseguiu decodificar a imagem.")
-            return None
+        # MAGIA 2: Pedimos a Frente nítida para o mesmo Proxy (só a redimensionando perfeitamente)
+        fg_proxy_url = f"https://wsrv.nl/?url={cover_url}&w={fg_size}&h={fg_size}&fit=cover&output=jpg&q=95"
+        r_fg = requests.get(fg_proxy_url, timeout=10)
+        r_fg.raise_for_status()
 
-        bg_w, bg_h = STORY_SIZE 
-        fg_size = int(bg_w * STORY_FRONT_RATIO) 
-
-        bg = cv2.resize(img, (bg_h, bg_h), interpolation=cv2.INTER_CUBIC)
+        # 3. Colagem final local super leve
+        bg_img = Image.open(io.BytesIO(r_bg.content)).convert("RGB")
+        fg_img = Image.open(io.BytesIO(r_fg.content)).convert("RGB")
         
-        start_x = (bg_h - bg_w) // 2
-        bg = bg[:, start_x:start_x+bg_w]
-        
-        blur_radius = 151 
-        bg = cv2.GaussianBlur(bg, (blur_radius, blur_radius), 0)
-
-        fg = cv2.resize(img, (fg_size, fg_size), interpolation=cv2.INTER_AREA)
-
         y_offset = (bg_h - fg_size) // 2
         x_offset = (bg_w - fg_size) // 2
         
-        bg[y_offset:y_offset+fg_size, x_offset:x_offset+fg_size] = fg
-
-        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 95]
-        success, buffer = cv2.imencode('.jpg', bg, encode_param)
+        bg_img.paste(fg_img, (x_offset, y_offset))
         
-        if success:
-            return buffer.tobytes()
-        else:
-            return None
+        buffer = io.BytesIO()
+        bg_img.save(buffer, format="JPEG", quality=95)
+        return buffer.getvalue()
 
+    except requests.exceptions.RequestException as e:
+        logger.error("Erro de rede no Proxy Weserv (O servidor host está bloqueando a saída?): %s", e)
+        return None
     except Exception as e:
-        logger.error("Falha no processamento OpenCV: %s", e)
+        logger.error("Falha na colagem de imagem do Story: %s", e)
         return None
 
 # =========================
@@ -528,7 +482,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 # =========================
-# BUSCA NORMAL
+# BUSCA NORMAL E DIRETA
 # =========================
 
 async def show_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str, mode: str = "play"):
@@ -553,6 +507,7 @@ async def show_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE
             title = sanitize(t.get("title"))
             artist = sanitize((t.get("artist") or {}).get("name"))
 
+            # Passando o modo (play ou story) para o botão
             keyboard.append([
                 InlineKeyboardButton(
                     f"🎵 {title} — {artist}",
@@ -569,6 +524,9 @@ async def show_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE, mode: str = "play"):
     query = (update.message.text or "").strip()
+    if not query:
+        await update.message.reply_text("🎤 Digite o nome de uma música.")
+        return
     await show_search_results(update, context, query, mode)
 
 async def _direct_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE, mode: str):
@@ -672,15 +630,15 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         # Pega a ação e o id no botão que foi clicado
-        action, track_id = cb.data.split(":", 1)
+        data_parts = cb.data.split(":", 1)
+        if len(data_parts) == 2:
+            action, track_id = data_parts
+        else:
+            action = "play"
+            track_id = data_parts[0]
     except Exception:
-        # Fallback de segurança para botões de versões antigas do bot
-        action = "play"
-        try:
-            track_id = cb.data.split(":", 1)[1]
-        except Exception:
-            await cb.answer("⚠️ Ação inválida.", show_alert=True)
-            return
+        await cb.answer("⚠️ Ação inválida.", show_alert=True)
+        return
 
     if action not in {"play", "story"}:
         action = "play"
@@ -708,6 +666,7 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = (t.get("album") or {}).get("cover_big")
 
     try:
+        # Envio principal sempre acontece
         if photo:
             await cb.message.reply_photo(
                 photo=photo,
@@ -721,6 +680,7 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 disable_web_page_preview=True
             )
 
+        # Processamento blindado do Story
         if action == "story":
             msg_status = await cb.message.reply_text("⏳ <i>Gerando imagem do Story, aguarde...</i>", parse_mode=ParseMode.HTML)
             
@@ -730,10 +690,10 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if story_bytes:
                     await cb.message.reply_photo(photo=story_bytes)
                 else:
-                    await cb.message.reply_text("⚠️ Não foi possível gerar o story.")
+                    await cb.message.reply_text("⚠️ Não foi possível gerar o story. Bloqueio de rede no acesso à capa.")
             except Exception as e:
-                logger.error("Erro na geração do story: %s", e)
-                await cb.message.reply_text("⚠️ Erro interno ao processar a imagem do Story.")
+                logger.error("Erro interno no Story: %s", e)
+                await cb.message.reply_text("⚠️ Erro ao processar a imagem do Story.")
             finally:
                 try:
                     await msg_status.delete()
@@ -741,7 +701,7 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
 
     except Exception as e:
-        logger.warning("Falha ao enviar música principal: %s", e)
+        logger.warning("Falha ao enviar publicação: %s", e)
         await cb.message.reply_text(
             caption,
             parse_mode=ParseMode.HTML,
