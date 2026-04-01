@@ -5,12 +5,15 @@ import json
 import logging
 import asyncio
 import time
+import io
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, List, Tuple
 
 import requests
 import redis
+
+from PIL import Image, ImageFilter, ImageOps
 
 from telegram import (
     Update,
@@ -49,7 +52,14 @@ session = requests.Session()
 # =========================
 
 PENDING_REPLIES: Dict[Tuple[int, int], float] = {}
+PENDING_ACTIONS: Dict[Tuple[int, int], str] = {}
 REPLY_TIMEOUT = 900  # 15 minutos
+
+STORY_SIZE = (1080, 1920)
+STORY_FRONT_RATIO = 0.70
+STORY_BLUR_RADIUS = 34
+STORY_MIN_COVER_SIZE = 600
+STORY_TARGET_COVER_SIZE = 1400
 
 # =========================
 # LOGGING
@@ -148,6 +158,123 @@ def sanitize(text: Any) -> str:
 def esc(text: Any) -> str:
     return html.escape(sanitize(text))
 
+def _resample_lanczos():
+    return getattr(Image, "Resampling", Image).LANCZOS
+
+
+def _unique_nonempty(values: List[str]) -> List[str]:
+    seen = set()
+    out = []
+    for value in values:
+        value = (value or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
+
+
+def _promote_deezer_cover_url(url: str, size: int) -> str:
+    if not url:
+        return url
+
+    promoted = re.sub(r"/\d+x\d+-", f"/{size}x{size}-", url, count=1)
+    promoted = re.sub(r"size=(small|medium|big|xl)", f"size={size}x{size}", promoted, flags=re.I)
+    return promoted
+
+
+def _cover_candidates(track: Dict[str, Any]) -> List[str]:
+    album = track.get("album") or {}
+    urls = [
+        album.get("cover_xl"),
+        album.get("cover_big"),
+        album.get("cover_medium"),
+        album.get("cover_small"),
+        album.get("cover"),
+    ]
+
+    candidates: List[str] = []
+    for url in _unique_nonempty([str(u) for u in urls if u]):
+        candidates.append(url)
+        candidates.append(_promote_deezer_cover_url(url, STORY_TARGET_COVER_SIZE))
+        candidates.append(_promote_deezer_cover_url(url, 1000))
+        candidates.append(_promote_deezer_cover_url(url, STORY_MIN_COVER_SIZE))
+
+    return _unique_nonempty(candidates)
+
+
+def _download_image_bytes(url: str) -> Optional[bytes]:
+    try:
+        r = session.get(url, timeout=8)
+        r.raise_for_status()
+        content_type = r.headers.get("content-type", "").lower()
+        if content_type and not content_type.startswith("image/"):
+            return None
+        if not r.content:
+            return None
+        return r.content
+    except Exception as e:
+        logger.warning("Falha ao baixar capa %s: %s", url, e)
+        return None
+
+
+def _open_image_from_bytes(data: bytes) -> Optional[Image.Image]:
+    try:
+        img = Image.open(io.BytesIO(data))
+        img.load()
+        return img
+    except Exception:
+        return None
+
+
+def _best_cover_image(track: Dict[str, Any]) -> Optional[Image.Image]:
+    best_img = None
+    best_score = -1
+    for url in _cover_candidates(track):
+        data = _download_image_bytes(url)
+        if not data:
+            continue
+        img = _open_image_from_bytes(data)
+        if img is None:
+            continue
+
+        score = min(img.size)
+        if score > best_score:
+            best_score = score
+            best_img = img.copy()
+
+        if score >= STORY_MIN_COVER_SIZE:
+            return img.copy()
+
+    return best_img
+
+
+def _render_story_image(track: Dict[str, Any]) -> Optional[bytes]:
+    cover = _best_cover_image(track)
+    if cover is None:
+        return None
+
+    try:
+        cover = cover.convert("RGB")
+        bg = ImageOps.fit(cover, STORY_SIZE, method=_resample_lanczos())
+        bg = bg.filter(ImageFilter.GaussianBlur(radius=STORY_BLUR_RADIUS))
+
+        front_w = int(STORY_SIZE[0] * STORY_FRONT_RATIO)
+        front = ImageOps.contain(cover, (front_w, front_w), method=_resample_lanczos())
+
+        canvas = bg.copy()
+        x = (STORY_SIZE[0] - front.size[0]) // 2
+        y = (STORY_SIZE[1] - front.size[1]) // 2
+        canvas.paste(front, (x, y))
+
+        buffer = io.BytesIO()
+        canvas.save(buffer, format="JPEG", quality=95, optimize=True, progressive=True)
+        buffer.seek(0)
+        return buffer.getvalue()
+    except Exception as e:
+        logger.warning("Falha ao gerar story: %s", e)
+        return None
+
+
 # =========================
 # HELPERS DE LAYOUT
 # =========================
@@ -165,11 +292,15 @@ def build_caption(title: Any, artist: Any, plays: int, user_first_name: Optional
     )
 
 def build_track_meta(track: Dict[str, Any]) -> Dict[str, str]:
+    album = track.get("album") or {}
     return {
         "title": str(track.get("title") or "Unknown"),
         "artist": str((track.get("artist") or {}).get("name") or "Unknown"),
-        "cover_big": str((track.get("album") or {}).get("cover_big") or ""),
-        "cover_small": str((track.get("album") or {}).get("cover_small") or ""),
+        "cover": str(album.get("cover") or ""),
+        "cover_small": str(album.get("cover_small") or ""),
+        "cover_medium": str(album.get("cover_medium") or ""),
+        "cover_big": str(album.get("cover_big") or ""),
+        "cover_xl": str(album.get("cover_xl") or ""),
     }
 
 def remember_track(track: Dict[str, Any]) -> None:
@@ -240,8 +371,11 @@ async def fetch_track_meta(track_id: str) -> Dict[str, str]:
     return {
         "title": f"Track {track_id}",
         "artist": "Unknown",
-        "cover_big": "",
+        "cover": "",
         "cover_small": "",
+        "cover_medium": "",
+        "cover_big": "",
+        "cover_xl": "",
     }
 
 async def resolve_track(track_id: str) -> Dict[str, Any]:
@@ -256,8 +390,11 @@ async def resolve_track(track_id: str) -> Dict[str, Any]:
         "title": meta.get("title", "Unknown"),
         "artist": {"name": meta.get("artist", "Unknown")},
         "album": {
-            "cover_big": meta.get("cover_big", ""),
+            "cover": meta.get("cover", ""),
             "cover_small": meta.get("cover_small", ""),
+            "cover_medium": meta.get("cover_medium", ""),
+            "cover_big": meta.get("cover_big", ""),
+            "cover_xl": meta.get("cover_xl", ""),
         }
     }
 
@@ -408,7 +545,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📌 Comandos:\n"
         f"/charts — suas músicas mais ouvidas\n"
         f"/top — ranking global\n"
-        f"/play – enviar uma música pelo grupo"
+        f"/play — enviar uma música pelo grupo\n"
+        f"/story — gerar story da música"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -416,8 +554,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # BUSCA NORMAL
 # =========================
 
-async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = (update.message.text or "").strip()
+async def show_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str, mode: str = "play"):
+    query = (query or "").strip()
     if not query:
         await update.message.reply_text("🎤 Digite o nome de uma música.")
         return
@@ -441,7 +579,7 @@ async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append([
                 InlineKeyboardButton(
                     f"🎵 {title} — {artist}",
-                    callback_data=f"play:{track_id}"
+                    callback_data=f"{mode}:{track_id}"
                 )
             ])
         except Exception as e:
@@ -452,6 +590,10 @@ async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
+async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE, mode: str = "play"):
+    query = (update.message.text or "").strip()
+    await show_search_results(update, context, query, mode=mode)
+
 # =========================
 # NOVO: GRUPO EXCLUSIVO
 # =========================
@@ -460,6 +602,12 @@ def cleanup_pending(now: float) -> None:
     expired = [k for k, ts in PENDING_REPLIES.items() if now - ts > REPLY_TIMEOUT]
     for k in expired:
         PENDING_REPLIES.pop(k, None)
+        PENDING_ACTIONS.pop(k, None)
+
+def set_pending_action(chat_id: int, user_id: int, mode: str) -> None:
+    key = (chat_id, user_id)
+    PENDING_REPLIES[key] = time.time()
+    PENDING_ACTIONS[key] = mode
 
 async def group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -478,7 +626,7 @@ async def group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (msg.text or "").strip()
 
-    is_command = text.startswith("/play")
+    is_command = text.startswith("/play") or text.startswith("/story")
     is_mention = BOT_USERNAME.lower() in text.lower()
 
     is_reply_to_bot = (
@@ -488,7 +636,7 @@ async def group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     if is_command or is_mention:
-        PENDING_REPLIES[key] = now
+        set_pending_action(chat.id, user.id, "story" if text.startswith("/story") else "play")
         await msg.reply_text(
             "🎧Responda aqui o nome de uma música ou use "
             f"{BOT_USERNAME} para pesquisar <i>inline</i>",
@@ -498,25 +646,26 @@ async def group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if is_reply_to_bot and key in PENDING_REPLIES:
         if now - PENDING_REPLIES[key] > REPLY_TIMEOUT:
+            mode = PENDING_ACTIONS.pop(key, "play")
             PENDING_REPLIES.pop(key, None)
-            await msg.reply_text("⏱️ Tempo expirado. Use /play novamente.")
+            await msg.reply_text(f"⏱️ Tempo expirado. Use /{mode} novamente.")
             return
 
+        mode = PENDING_ACTIONS.pop(key, "play")
         PENDING_REPLIES.pop(key, None)
-        await search_music(update, context)
+        await search_music(update, context, mode=mode)
         return
 
     return
 
-async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def _direct_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE, mode: str):
     chat = update.effective_chat
     user = update.effective_user
     now = time.time()
 
     if chat.type in ["group", "supergroup"]:
-        key = (chat.id, user.id)
         cleanup_pending(now)
-        PENDING_REPLIES[key] = now
+        set_pending_action(chat.id, user.id, mode)
 
         await update.message.reply_text(
             "🎧Responda aqui o nome de uma música ou use "
@@ -530,35 +679,13 @@ async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🎤 Digite o nome de uma música.")
         return
 
-    tracks = await deezer_search(query)
+    await show_search_results(update, context, query, mode=mode)
 
-    if not tracks:
-        await update.message.reply_text("🔎 Nada encontrado.")
-        return
+async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _direct_search_command(update, context, mode="play")
 
-    keyboard = []
-
-    for t in tracks[:5]:
-        try:
-            track_id = str(t["id"])
-            remember_track(t)
-
-            title = sanitize(t.get("title"))
-            artist = sanitize((t.get("artist") or {}).get("name"))
-
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"🎵 {title} — {artist}",
-                    callback_data=f"play:{track_id}"
-                )
-            ])
-        except Exception as e:
-            logger.warning("Erro montando botão: %s", e)
-
-    await update.message.reply_text(
-        "🎧 Escolha:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+async def story(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _direct_search_command(update, context, mode="story")
 
 # =========================
 # CLICK DO CHAT
@@ -569,10 +696,13 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await cb.answer()
 
     try:
-        track_id = cb.data.split(":", 1)[1]
+        action, track_id = cb.data.split(":", 1)
     except Exception:
         await cb.answer("⚠️ Ação inválida.", show_alert=True)
         return
+
+    if action not in {"play", "story"}:
+        action = "play"
 
     try:
         t = await resolve_track(track_id)
@@ -594,7 +724,8 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_first_name=cb.from_user.first_name,
     )
 
-    photo = (t.get("album") or {}).get("cover_big")
+    cover_urls = _cover_candidates(t)
+    photo = cover_urls[0] if cover_urls else (t.get("album") or {}).get("cover_big")
 
     try:
         if photo:
@@ -609,6 +740,15 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True
             )
+
+        if action == "story":
+            story_bytes = _render_story_image(t)
+            if story_bytes:
+                await cb.message.reply_photo(
+                    photo=story_bytes,
+                )
+            else:
+                await cb.message.reply_text("⚠️ Não foi possível gerar o story.")
     except Exception as e:
         logger.warning("Falha ao enviar música: %s", e)
         await cb.message.reply_text(
@@ -616,7 +756,6 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True
         )
-
 # =========================
 # INLINE MODE
 # =========================
@@ -636,8 +775,9 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             track_id = str(t["id"])
             title = sanitize(t.get("title"))
             artist = sanitize((t.get("artist") or {}).get("name"))
-            cover_big = (t.get("album") or {}).get("cover_big")
-            cover_small = (t.get("album") or {}).get("cover_small")
+            cover_urls = _cover_candidates(t)
+            cover_big = cover_urls[0] if cover_urls else (t.get("album") or {}).get("cover_big")
+            cover_small = (t.get("album") or {}).get("cover_small") or cover_big
 
             if not cover_big:
                 continue
@@ -694,8 +834,11 @@ async def chosen_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "title": meta.get("title", "Unknown"),
                 "artist": {"name": meta.get("artist", "Unknown")},
                 "album": {
-                    "cover_big": meta.get("cover_big", ""),
+                    "cover": meta.get("cover", ""),
                     "cover_small": meta.get("cover_small", ""),
+                    "cover_medium": meta.get("cover_medium", ""),
+                    "cover_big": meta.get("cover_big", ""),
+                    "cover_xl": meta.get("cover_xl", ""),
                 }
             }
 
@@ -885,6 +1028,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("play", play))
+    app.add_handler(CommandHandler("story", story))
     app.add_handler(CommandHandler("charts", stats))
     app.add_handler(CommandHandler("top", top))
     app.add_handler(CommandHandler("log", log_cmd))
