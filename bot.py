@@ -742,7 +742,12 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         if action == "story":
-            story_bytes = _render_story_image(t)
+            msg_status = await cb.message.reply_text("⏳ <i>Gerando imagem do Story, aguarde...</i>", parse_mode=ParseMode.HTML)
+            
+            story_bytes = await asyncio.to_thread(_render_story_image, t)
+            
+            await msg_status.delete()
+            
             if story_bytes:
                 await cb.message.reply_photo(
                     photo=story_bytes,
@@ -756,6 +761,7 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True
         )
+
 # =========================
 # INLINE MODE
 # =========================
