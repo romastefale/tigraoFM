@@ -55,6 +55,7 @@ PENDING_REPLIES: Dict[Tuple[int, int], float] = {}
 PENDING_ACTIONS: Dict[Tuple[int, int], str] = {}
 REPLY_TIMEOUT = 900  # 15 minutos
 
+# Configurações do Story
 STORY_SIZE = (1080, 1920)
 STORY_FRONT_RATIO = 0.70
 STORY_BLUR_RADIUS = 34
@@ -158,9 +159,12 @@ def sanitize(text: Any) -> str:
 def esc(text: Any) -> str:
     return html.escape(sanitize(text))
 
+# =========================
+# PROCESSAMENTO DE IMAGEM (STORY)
+# =========================
+
 def _resample_lanczos():
     return getattr(Image, "Resampling", Image).LANCZOS
-
 
 def _unique_nonempty(values: List[str]) -> List[str]:
     seen = set()
@@ -172,15 +176,12 @@ def _unique_nonempty(values: List[str]) -> List[str]:
             out.append(value)
     return out
 
-
 def _promote_deezer_cover_url(url: str, size: int) -> str:
     if not url:
         return url
-
     promoted = re.sub(r"/\d+x\d+-", f"/{size}x{size}-", url, count=1)
     promoted = re.sub(r"size=(small|medium|big|xl)", f"size={size}x{size}", promoted, flags=re.I)
     return promoted
-
 
 def _cover_candidates(track: Dict[str, Any]) -> List[str]:
     album = track.get("album") or {}
@@ -201,7 +202,6 @@ def _cover_candidates(track: Dict[str, Any]) -> List[str]:
 
     return _unique_nonempty(candidates)
 
-
 def _download_image_bytes(url: str) -> Optional[bytes]:
     try:
         r = session.get(url, timeout=8)
@@ -216,7 +216,6 @@ def _download_image_bytes(url: str) -> Optional[bytes]:
         logger.warning("Falha ao baixar capa %s: %s", url, e)
         return None
 
-
 def _open_image_from_bytes(data: bytes) -> Optional[Image.Image]:
     try:
         img = Image.open(io.BytesIO(data))
@@ -224,7 +223,6 @@ def _open_image_from_bytes(data: bytes) -> Optional[Image.Image]:
         return img
     except Exception:
         return None
-
 
 def _best_cover_image(track: Dict[str, Any]) -> Optional[Image.Image]:
     best_img = None
@@ -246,7 +244,6 @@ def _best_cover_image(track: Dict[str, Any]) -> Optional[Image.Image]:
             return img.copy()
 
     return best_img
-
 
 def _render_story_image(track: Dict[str, Any]) -> Optional[bytes]:
     cover = _best_cover_image(track)
@@ -273,7 +270,6 @@ def _render_story_image(track: Dict[str, Any]) -> Optional[bytes]:
     except Exception as e:
         logger.warning("Falha ao gerar story: %s", e)
         return None
-
 
 # =========================
 # HELPERS DE LAYOUT
@@ -551,7 +547,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 # =========================
-# BUSCA NORMAL
+# BUSCA NORMAL E DIRETA
 # =========================
 
 async def show_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str, mode: str = "play"):
@@ -576,6 +572,7 @@ async def show_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE
             title = sanitize(t.get("title"))
             artist = sanitize((t.get("artist") or {}).get("name"))
 
+            # Passando o modo (play ou story) para o botão
             keyboard.append([
                 InlineKeyboardButton(
                     f"🎵 {title} — {artist}",
@@ -592,7 +589,38 @@ async def show_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE, mode: str = "play"):
     query = (update.message.text or "").strip()
-    await show_search_results(update, context, query, mode=mode)
+    await show_search_results(update, context, query, mode)
+
+async def _direct_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE, mode: str):
+    chat = update.effective_chat
+    user = update.effective_user
+    now = time.time()
+
+    if chat.type in ["group", "supergroup"]:
+        key = (chat.id, user.id)
+        cleanup_pending(now)
+        PENDING_REPLIES[key] = now
+        PENDING_ACTIONS[key] = mode
+
+        await update.message.reply_text(
+            "🎧Responda aqui o nome de uma música ou use "
+            f"{BOT_USERNAME} para pesquisar <i>inline</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    query = " ".join(context.args).strip()
+    if not query:
+        await update.message.reply_text("🎤 Digite o nome de uma música.")
+        return
+
+    await show_search_results(update, context, query, mode)
+
+async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _direct_search_command(update, context, mode="play")
+
+async def story(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _direct_search_command(update, context, mode="story")
 
 # =========================
 # NOVO: GRUPO EXCLUSIVO
@@ -603,11 +631,6 @@ def cleanup_pending(now: float) -> None:
     for k in expired:
         PENDING_REPLIES.pop(k, None)
         PENDING_ACTIONS.pop(k, None)
-
-def set_pending_action(chat_id: int, user_id: int, mode: str) -> None:
-    key = (chat_id, user_id)
-    PENDING_REPLIES[key] = time.time()
-    PENDING_ACTIONS[key] = mode
 
 async def group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -636,7 +659,8 @@ async def group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     if is_command or is_mention:
-        set_pending_action(chat.id, user.id, "story" if text.startswith("/story") else "play")
+        PENDING_REPLIES[key] = now
+        PENDING_ACTIONS[key] = "story" if text.startswith("/story") else "play"
         await msg.reply_text(
             "🎧Responda aqui o nome de uma música ou use "
             f"{BOT_USERNAME} para pesquisar <i>inline</i>",
@@ -653,39 +677,10 @@ async def group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         mode = PENDING_ACTIONS.pop(key, "play")
         PENDING_REPLIES.pop(key, None)
-        await search_music(update, context, mode=mode)
+        await search_music(update, context, mode)
         return
 
     return
-
-async def _direct_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE, mode: str):
-    chat = update.effective_chat
-    user = update.effective_user
-    now = time.time()
-
-    if chat.type in ["group", "supergroup"]:
-        cleanup_pending(now)
-        set_pending_action(chat.id, user.id, mode)
-
-        await update.message.reply_text(
-            "🎧Responda aqui o nome de uma música ou use "
-            f"{BOT_USERNAME} para pesquisar <i>inline</i>",
-            parse_mode=ParseMode.HTML
-        )
-        return
-
-    query = " ".join(context.args).strip()
-    if not query:
-        await update.message.reply_text("🎤 Digite o nome de uma música.")
-        return
-
-    await show_search_results(update, context, query, mode=mode)
-
-async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await _direct_search_command(update, context, mode="play")
-
-async def story(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await _direct_search_command(update, context, mode="story")
 
 # =========================
 # CLICK DO CHAT
@@ -696,6 +691,7 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await cb.answer()
 
     try:
+        # Pega a ação e o id no botão que foi clicado
         action, track_id = cb.data.split(":", 1)
     except Exception:
         await cb.answer("⚠️ Ação inválida.", show_alert=True)
@@ -728,6 +724,7 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = cover_urls[0] if cover_urls else (t.get("album") or {}).get("cover_big")
 
     try:
+        # Sempre manda a publicação normal com o player do Telegram
         if photo:
             await cb.message.reply_photo(
                 photo=photo,
@@ -741,19 +738,28 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 disable_web_page_preview=True
             )
 
+        # Se o comando for story, processa a imagem de forma assíncrona
         if action == "story":
             msg_status = await cb.message.reply_text("⏳ <i>Gerando imagem do Story, aguarde...</i>", parse_mode=ParseMode.HTML)
             
-            story_bytes = await asyncio.to_thread(_render_story_image, t)
-            
-            await msg_status.delete()
-            
-            if story_bytes:
-                await cb.message.reply_photo(
-                    photo=story_bytes,
-                )
-            else:
-                await cb.message.reply_text("⚠️ Não foi possível gerar o story.")
+            try:
+                # O asyncio.to_thread executa o processamento pesado de Pillow em background (não bloqueia o bot)
+                story_bytes = await asyncio.to_thread(_render_story_image, t)
+                
+                if story_bytes:
+                    await cb.message.reply_photo(photo=story_bytes)
+                else:
+                    await cb.message.reply_text("⚠️ Não foi possível gerar o story.")
+            except Exception as e:
+                logger.error("Erro interno ao gerar a imagem: %s", e)
+                await cb.message.reply_text("⚠️ Erro ao processar o Story.")
+            finally:
+                # Garante que apaga a mensagem de "⏳ Gerando..."
+                try:
+                    await msg_status.delete()
+                except Exception:
+                    pass
+
     except Exception as e:
         logger.warning("Falha ao enviar música: %s", e)
         await cb.message.reply_text(
@@ -840,11 +846,8 @@ async def chosen_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "title": meta.get("title", "Unknown"),
                 "artist": {"name": meta.get("artist", "Unknown")},
                 "album": {
-                    "cover": meta.get("cover", ""),
-                    "cover_small": meta.get("cover_small", ""),
-                    "cover_medium": meta.get("cover_medium", ""),
                     "cover_big": meta.get("cover_big", ""),
-                    "cover_xl": meta.get("cover_xl", ""),
+                    "cover_small": meta.get("cover_small", ""),
                 }
             }
 
