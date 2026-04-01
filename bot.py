@@ -5,15 +5,14 @@ import json
 import logging
 import asyncio
 import time
-import io
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, List, Tuple
 
 import requests
 import redis
-
-from PIL import Image, ImageFilter, ImageOps
+import cv2
+import numpy as np
 
 from telegram import (
     Update,
@@ -55,10 +54,11 @@ PENDING_REPLIES: Dict[Tuple[int, int], float] = {}
 PENDING_ACTIONS: Dict[Tuple[int, int], str] = {}
 REPLY_TIMEOUT = 900  # 15 minutos
 
-# Configurações do Story
+# =========================
+# CONFIG STORY
+# =========================
 STORY_SIZE = (1080, 1920)
 STORY_FRONT_RATIO = 0.70
-STORY_BLUR_RADIUS = 34
 STORY_MIN_COVER_SIZE = 600
 STORY_TARGET_COVER_SIZE = 1400
 
@@ -160,11 +160,8 @@ def esc(text: Any) -> str:
     return html.escape(sanitize(text))
 
 # =========================
-# PROCESSAMENTO DE IMAGEM (STORY)
+# PROCESSAMENTO DE IMAGEM (OPENCV)
 # =========================
-
-def _resample_lanczos():
-    return getattr(Image, "Resampling", Image).LANCZOS
 
 def _unique_nonempty(values: List[str]) -> List[str]:
     seen = set()
@@ -204,7 +201,6 @@ def _cover_candidates(track: Dict[str, Any]) -> List[str]:
 
 def _download_image_bytes(url: str) -> Optional[bytes]:
     try:
-        # Usa-se um GET isolado em vez do `session` global para evitar falhas de conexão em threads
         r = requests.get(url, timeout=10)
         r.raise_for_status()
         if not r.content:
@@ -214,62 +210,56 @@ def _download_image_bytes(url: str) -> Optional[bytes]:
         logger.warning("Falha ao baixar capa %s: %s", url, e)
         return None
 
-def _open_image_from_bytes(data: bytes) -> Optional[Image.Image]:
-    try:
-        img = Image.open(io.BytesIO(data))
-        img.load()
-        return img
-    except Exception:
-        return None
-
-def _best_cover_image(track: Dict[str, Any]) -> Optional[Image.Image]:
-    best_img = None
-    best_score = -1
-    for url in _cover_candidates(track):
-        data = _download_image_bytes(url)
-        if not data:
-            continue
-        img = _open_image_from_bytes(data)
-        if img is None:
-            continue
-
-        score = min(img.size)
-        if score > best_score:
-            best_score = score
-            best_img = img.copy()
-
-        if score >= STORY_MIN_COVER_SIZE:
-            return img.copy()
-
-    return best_img
-
 def _render_story_image(track: Dict[str, Any]) -> Optional[bytes]:
-    cover = _best_cover_image(track)
-    if cover is None:
+    cover_url = None
+    for url in _cover_candidates(track):
+        if url:
+            cover_url = url
+            break
+            
+    if not cover_url:
+        return None
+
+    data = _download_image_bytes(cover_url)
+    if not data:
         return None
 
     try:
-        cover = cover.convert("RGB")
+        nparr = np.frombuffer(data, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
-        # Criação do Fundo Desfocado
-        bg = ImageOps.fit(cover, STORY_SIZE, method=_resample_lanczos())
-        bg = bg.filter(ImageFilter.GaussianBlur(radius=STORY_BLUR_RADIUS))
+        if img is None:
+            logger.error("OpenCV não conseguiu decodificar a imagem.")
+            return None
 
-        # Redimensionamento Seguro da Frente (Evita falhas do ImageOps.contain)
-        front_w = int(STORY_SIZE[0] * STORY_FRONT_RATIO)
-        front = cover.resize((front_w, front_w), resample=_resample_lanczos())
+        bg_w, bg_h = STORY_SIZE 
+        fg_size = int(bg_w * STORY_FRONT_RATIO) 
 
-        # Colagem e Renderização
-        canvas = bg.copy()
-        x = (STORY_SIZE[0] - front_w) // 2
-        y = (STORY_SIZE[1] - front_w) // 2
-        canvas.paste(front, (x, y))
+        bg = cv2.resize(img, (bg_h, bg_h), interpolation=cv2.INTER_CUBIC)
+        
+        start_x = (bg_h - bg_w) // 2
+        bg = bg[:, start_x:start_x+bg_w]
+        
+        blur_radius = 151 
+        bg = cv2.GaussianBlur(bg, (blur_radius, blur_radius), 0)
 
-        buffer = io.BytesIO()
-        canvas.save(buffer, format="JPEG", quality=95)
-        return buffer.getvalue()
+        fg = cv2.resize(img, (fg_size, fg_size), interpolation=cv2.INTER_AREA)
+
+        y_offset = (bg_h - fg_size) // 2
+        x_offset = (bg_w - fg_size) // 2
+        
+        bg[y_offset:y_offset+fg_size, x_offset:x_offset+fg_size] = fg
+
+        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 95]
+        success, buffer = cv2.imencode('.jpg', bg, encode_param)
+        
+        if success:
+            return buffer.tobytes()
+        else:
+            return None
+
     except Exception as e:
-        logger.error("Erro interno no processamento Pillow: %s", e)
+        logger.error("Falha no processamento OpenCV: %s", e)
         return None
 
 # =========================
@@ -289,15 +279,11 @@ def build_caption(title: Any, artist: Any, plays: int, user_first_name: Optional
     )
 
 def build_track_meta(track: Dict[str, Any]) -> Dict[str, str]:
-    album = track.get("album") or {}
     return {
         "title": str(track.get("title") or "Unknown"),
         "artist": str((track.get("artist") or {}).get("name") or "Unknown"),
-        "cover": str(album.get("cover") or ""),
-        "cover_small": str(album.get("cover_small") or ""),
-        "cover_medium": str(album.get("cover_medium") or ""),
-        "cover_big": str(album.get("cover_big") or ""),
-        "cover_xl": str(album.get("cover_xl") or ""),
+        "cover_big": str((track.get("album") or {}).get("cover_big") or ""),
+        "cover_small": str((track.get("album") or {}).get("cover_small") or ""),
     }
 
 def remember_track(track: Dict[str, Any]) -> None:
@@ -368,11 +354,8 @@ async def fetch_track_meta(track_id: str) -> Dict[str, str]:
     return {
         "title": f"Track {track_id}",
         "artist": "Unknown",
-        "cover": "",
-        "cover_small": "",
-        "cover_medium": "",
         "cover_big": "",
-        "cover_xl": "",
+        "cover_small": "",
     }
 
 async def resolve_track(track_id: str) -> Dict[str, Any]:
@@ -387,11 +370,8 @@ async def resolve_track(track_id: str) -> Dict[str, Any]:
         "title": meta.get("title", "Unknown"),
         "artist": {"name": meta.get("artist", "Unknown")},
         "album": {
-            "cover": meta.get("cover", ""),
-            "cover_small": meta.get("cover_small", ""),
-            "cover_medium": meta.get("cover_medium", ""),
             "cover_big": meta.get("cover_big", ""),
-            "cover_xl": meta.get("cover_xl", ""),
+            "cover_small": meta.get("cover_small", ""),
         }
     }
 
@@ -548,7 +528,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 # =========================
-# BUSCA NORMAL E DIRETA
+# BUSCA NORMAL
 # =========================
 
 async def show_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str, mode: str = "play"):
@@ -573,7 +553,6 @@ async def show_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE
             title = sanitize(t.get("title"))
             artist = sanitize((t.get("artist") or {}).get("name"))
 
-            # Passando o modo (play ou story) para o botão
             keyboard.append([
                 InlineKeyboardButton(
                     f"🎵 {title} — {artist}",
@@ -671,8 +650,8 @@ async def group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if is_reply_to_bot and key in PENDING_REPLIES:
         if now - PENDING_REPLIES[key] > REPLY_TIMEOUT:
-            mode = PENDING_ACTIONS.pop(key, "play")
             PENDING_REPLIES.pop(key, None)
+            mode = PENDING_ACTIONS.pop(key, "play")
             await msg.reply_text(f"⏱️ Tempo expirado. Use /{mode} novamente.")
             return
 
@@ -695,8 +674,13 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Pega a ação e o id no botão que foi clicado
         action, track_id = cb.data.split(":", 1)
     except Exception:
-        await cb.answer("⚠️ Ação inválida.", show_alert=True)
-        return
+        # Fallback de segurança para botões de versões antigas do bot
+        action = "play"
+        try:
+            track_id = cb.data.split(":", 1)[1]
+        except Exception:
+            await cb.answer("⚠️ Ação inválida.", show_alert=True)
+            return
 
     if action not in {"play", "story"}:
         action = "play"
@@ -721,11 +705,9 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_first_name=cb.from_user.first_name,
     )
 
-    cover_urls = _cover_candidates(t)
-    photo = cover_urls[0] if cover_urls else (t.get("album") or {}).get("cover_big")
+    photo = (t.get("album") or {}).get("cover_big")
 
     try:
-        # Sempre manda a publicação normal com o player do Telegram
         if photo:
             await cb.message.reply_photo(
                 photo=photo,
@@ -739,30 +721,27 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 disable_web_page_preview=True
             )
 
-        # Se o comando for story, processa a imagem de forma assíncrona
         if action == "story":
             msg_status = await cb.message.reply_text("⏳ <i>Gerando imagem do Story, aguarde...</i>", parse_mode=ParseMode.HTML)
             
             try:
-                # O asyncio.to_thread executa o processamento pesado em background
                 story_bytes = await asyncio.to_thread(_render_story_image, t)
                 
                 if story_bytes:
                     await cb.message.reply_photo(photo=story_bytes)
                 else:
-                    await cb.message.reply_text("⚠️ Não foi possível gerar o story. Ocorreu um erro ao processar a capa.")
+                    await cb.message.reply_text("⚠️ Não foi possível gerar o story.")
             except Exception as e:
-                logger.error("Erro interno ao tentar gerar imagem: %s", e)
-                await cb.message.reply_text("⚠️ Erro no servidor ao gerar o Story.")
+                logger.error("Erro na geração do story: %s", e)
+                await cb.message.reply_text("⚠️ Erro interno ao processar a imagem do Story.")
             finally:
-                # Garante que apaga a mensagem de "⏳ Gerando..."
                 try:
                     await msg_status.delete()
                 except Exception:
                     pass
 
     except Exception as e:
-        logger.warning("Falha ao enviar música: %s", e)
+        logger.warning("Falha ao enviar música principal: %s", e)
         await cb.message.reply_text(
             caption,
             parse_mode=ParseMode.HTML,
@@ -788,9 +767,8 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             track_id = str(t["id"])
             title = sanitize(t.get("title"))
             artist = sanitize((t.get("artist") or {}).get("name"))
-            cover_urls = _cover_candidates(t)
-            cover_big = cover_urls[0] if cover_urls else (t.get("album") or {}).get("cover_big")
-            cover_small = (t.get("album") or {}).get("cover_small") or cover_big
+            cover_big = (t.get("album") or {}).get("cover_big")
+            cover_small = (t.get("album") or {}).get("cover_small")
 
             if not cover_big:
                 continue
