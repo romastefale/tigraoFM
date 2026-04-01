@@ -557,8 +557,38 @@ async def _direct_search_command(update: Update, context: ContextTypes.DEFAULT_T
 async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _direct_search_command(update, context, mode="play")
 
+async def _story_group_prompt(message) -> None:
+    await message.reply_text(
+        "🎧Responda aqui o nome de uma música para gerar o story ou use "
+        f"{BOT_USERNAME} para pesquisar <i>inline</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+async def _story_private_search(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str) -> None:
+    if not query:
+        await update.message.reply_text("🎤 Use /story nome da música.")
+        return
+    await show_search_results(update, context, query, mode="story")
+
 async def story(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await _direct_search_command(update, context, mode="story")
+    msg = update.message
+    if not msg:
+        return
+
+    chat = update.effective_chat
+    user = update.effective_user
+    now = time.time()
+    cleanup_pending(now)
+
+    if chat.type in ["group", "supergroup"]:
+        key = (chat.id, user.id)
+        PENDING_REPLIES[key] = now
+        PENDING_ACTIONS[key] = "story"
+        await _story_group_prompt(msg)
+        return
+
+    query = " ".join(context.args).strip()
+    await _story_private_search(update, context, query)
 
 # =========================
 # NOVO: GRUPO EXCLUSIVO
