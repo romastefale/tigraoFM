@@ -204,11 +204,9 @@ def _cover_candidates(track: Dict[str, Any]) -> List[str]:
 
 def _download_image_bytes(url: str) -> Optional[bytes]:
     try:
-        r = session.get(url, timeout=8)
+        # Usa-se um GET isolado em vez do `session` global para evitar falhas de conexão em threads
+        r = requests.get(url, timeout=10)
         r.raise_for_status()
-        content_type = r.headers.get("content-type", "").lower()
-        if content_type and not content_type.startswith("image/"):
-            return None
         if not r.content:
             return None
         return r.content
@@ -252,23 +250,26 @@ def _render_story_image(track: Dict[str, Any]) -> Optional[bytes]:
 
     try:
         cover = cover.convert("RGB")
+        
+        # Criação do Fundo Desfocado
         bg = ImageOps.fit(cover, STORY_SIZE, method=_resample_lanczos())
         bg = bg.filter(ImageFilter.GaussianBlur(radius=STORY_BLUR_RADIUS))
 
+        # Redimensionamento Seguro da Frente (Evita falhas do ImageOps.contain)
         front_w = int(STORY_SIZE[0] * STORY_FRONT_RATIO)
-        front = ImageOps.contain(cover, (front_w, front_w), method=_resample_lanczos())
+        front = cover.resize((front_w, front_w), resample=_resample_lanczos())
 
+        # Colagem e Renderização
         canvas = bg.copy()
-        x = (STORY_SIZE[0] - front.size[0]) // 2
-        y = (STORY_SIZE[1] - front.size[1]) // 2
+        x = (STORY_SIZE[0] - front_w) // 2
+        y = (STORY_SIZE[1] - front_w) // 2
         canvas.paste(front, (x, y))
 
         buffer = io.BytesIO()
-        canvas.save(buffer, format="JPEG", quality=95, optimize=True, progressive=True)
-        buffer.seek(0)
+        canvas.save(buffer, format="JPEG", quality=95)
         return buffer.getvalue()
     except Exception as e:
-        logger.warning("Falha ao gerar story: %s", e)
+        logger.error("Erro interno no processamento Pillow: %s", e)
         return None
 
 # =========================
@@ -743,16 +744,16 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg_status = await cb.message.reply_text("⏳ <i>Gerando imagem do Story, aguarde...</i>", parse_mode=ParseMode.HTML)
             
             try:
-                # O asyncio.to_thread executa o processamento pesado de Pillow em background (não bloqueia o bot)
+                # O asyncio.to_thread executa o processamento pesado em background
                 story_bytes = await asyncio.to_thread(_render_story_image, t)
                 
                 if story_bytes:
                     await cb.message.reply_photo(photo=story_bytes)
                 else:
-                    await cb.message.reply_text("⚠️ Não foi possível gerar o story.")
+                    await cb.message.reply_text("⚠️ Não foi possível gerar o story. Ocorreu um erro ao processar a capa.")
             except Exception as e:
-                logger.error("Erro interno ao gerar a imagem: %s", e)
-                await cb.message.reply_text("⚠️ Erro ao processar o Story.")
+                logger.error("Erro interno ao tentar gerar imagem: %s", e)
+                await cb.message.reply_text("⚠️ Erro no servidor ao gerar o Story.")
             finally:
                 # Garante que apaga a mensagem de "⏳ Gerando..."
                 try:
