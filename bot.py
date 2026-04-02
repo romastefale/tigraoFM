@@ -24,6 +24,8 @@ from telegram import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     InlineQueryResultPhoto,
+    InlineQueryResultArticle,
+    InputTextMessageContent,
     ForceReply,
     Message,
 )
@@ -1880,7 +1882,6 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     results = []
-
     ranked = rank_tracks(query, tracks)
 
     for score, t in ranked[:10]:
@@ -1888,7 +1889,6 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             track_id = str(t["id"])
             title = sanitize(t.get("title"))
             artist = sanitize((t.get("artist") or {}).get("name"))
-            # Nova linha para puxar o nome do álbum:
             album_name = sanitize((t.get("album") or {}).get("title") or "Desconhecido")
             cover_big = (t.get("album") or {}).get("cover_big")
             cover_small = (t.get("album") or {}).get("cover_small")
@@ -1899,21 +1899,24 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             remember_track(t)
             current_count = get_play_count(user.id, track_id)
 
+            caption = build_caption(
+                title=title,
+                artist=artist,
+                plays=current_count,
+                user_first_name=user.first_name,
+            )
+
             results.append(
-                InlineQueryResultPhoto(
+                InlineQueryResultArticle(
                     id=f"track:{track_id}",
-                    photo_url=cover_big,
+                    title=f"🎵 {title}",
+                    description=f"{artist} — {album_name}",
                     thumbnail_url=cover_small or cover_big,
-                    caption=build_caption(
-                        title=title,
-                        artist=artist,
-                        plays=current_count,
-                        user_first_name=user.first_name,
-                    ),
-                    parse_mode=ParseMode.HTML,
-                    # Deixando exatamente como você pediu:
-                    title=title, 
-                    description=f"- {album_name} – {artist}"
+                    input_message_content=InputTextMessageContent(
+                        message_text=f"<a href='{cover_big}'>&#8203;</a>\n{caption}",
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=False
+                    )
                 )
             )
         except Exception as e:
