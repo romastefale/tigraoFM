@@ -1,4 +1,4 @@
-python-telegram-bot==20.7
-requests==2.31.0
-redis
-Pillow
+python-telegram-bot>=20.0,<22.0
+redis>=5.0
+requests>=2.31
+Pillow>=10.0
