@@ -1285,31 +1285,59 @@ async def story_reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await msg.reply_text("🎵 Envie um nome de música válido.")
         return
 
-    track = await story_fetch_track(normalized_query)
-    if track is None or not track.get("id"):
-        tracks_probe = await deezer_search(normalized_query)
-        if tracks_probe is None:
-            await msg.reply_text("⚠️ Erro ao acessar Deezer. Tente novamente.")
-        elif tracks_probe:
-            ranked_probe = rank_tracks(normalized_query, tracks_probe)
-            suggestions = []
-            for score, t in ranked_probe[:3]:
-                title = sanitize(t.get("title"))
-                artist = sanitize((t.get("artist") or {}).get("name"))
-                suggestions.append(f"• {title} — {artist}")
-            await msg.reply_text(
-                "🔎 Não foi possível determinar a música com confiança.\n\n"
-                "Sugestões:\n" + "\n".join(suggestions)
-            )
-        else:
-            await msg.reply_text("🔎 Música não encontrada.")
+    tracks = await deezer_search(normalized_query)
+    
+    if tracks is None:
+        await msg.reply_text("⚠️ Erro ao acessar o serviço de busca. Tente novamente.")
+        return
+        
+    if not tracks:
+        await msg.reply_text("🔎 Nenhuma música encontrada com esse nome.")
         return
 
-    track_id = str(track.get("id") or "")
+    ranked = rank_tracks(normalized_query, tracks)
+    keyboard = []
+    
+    # Monta os botões com as 5 melhores correspondências
+    for score, t in ranked[:5]:
+        track_id = str(t["id"])
+        title = _truncate(t.get("title") or "Unknown", 30)
+        artist = _truncate((t.get("artist") or {}).get("name") or "Unknown", 30)
+        keyboard.append([
+            InlineKeyboardButton(
+                f"🎵 {title} — {artist}",
+                callback_data=f"story_select:{track_id}"
+            )
+        ])
+
+    if not keyboard:
+        await msg.reply_text("🔎 Nenhuma correspondência válida encontrada.")
+        return
+
+    await msg.reply_text(
+        "🎧 Qual destas músicas você quer no seu Story?",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def story_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cb = update.callback_query
+    await cb.answer()
+
+    try:
+        _, track_id = cb.data.split(":", 1)
+    except ValueError:
+        return
+
+    track = await resolve_track(track_id)
+    if not track or not track.get("id"):
+        await cb.edit_message_text("❌ Música não encontrada ou indisponível.")
+        return
+
     title = _truncate(track.get("title") or "Unknown", 30)
     artist = _truncate((track.get("artist") or {}).get("name") or "Unknown", 30)
 
-    # Envia os botões de seleção de Tema
+    # Botões de tema
     keyboard = [
         [
             InlineKeyboardButton("Modo Claro ⚪️", callback_data=f"story_theme:light:{track_id}"),
@@ -1317,8 +1345,8 @@ async def story_reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         ]
     ]
 
-    await msg.reply_text(
-        f"🎶 Música encontrada: <b>{esc(title)} — {esc(artist)}</b>\n\n🎨 Escolha o tema do card:",
+    await cb.edit_message_text(
+        f"🎶 Música escolhida: <b>{esc(title)} — {esc(artist)}</b>\n\n🎨 Escolha o tema do card para gerar a imagem:",
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -2026,6 +2054,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, search_music))
 
     app.add_handler(CallbackQueryHandler(story_theme_callback, pattern=r"^story_theme:"))
+    app.add_handler(CallbackQueryHandler(story_select_callback, pattern=r"^story_select:"))
     app.add_handler(CallbackQueryHandler(click, pattern=r"^play:"))
 
     app.add_handler(InlineQueryHandler(inline_query))
