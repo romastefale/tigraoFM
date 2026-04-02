@@ -1866,6 +1866,8 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             track_id = str(t["id"])
             title = sanitize(t.get("title"))
             artist = sanitize((t.get("artist") or {}).get("name"))
+            # Nova linha para puxar o nome do álbum:
+            album_name = sanitize((t.get("album") or {}).get("title") or "Desconhecido")
             cover_big = (t.get("album") or {}).get("cover_big")
             cover_small = (t.get("album") or {}).get("cover_small")
 
@@ -1887,8 +1889,9 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         user_first_name=user.first_name,
                     ),
                     parse_mode=ParseMode.HTML,
-                    title=f"{title} — {artist}",
-                    description=f"{artist} • {current_count} Plays"
+                    # Deixando exatamente como você pediu:
+                    title=title, 
+                    description=f"- {album_name} – {artist}"
                 )
             )
         except Exception as e:
