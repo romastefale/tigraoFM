@@ -5,15 +5,12 @@ import json
 import logging
 import asyncio
 import time
-import io
-import urllib.parse
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, List, Tuple
 
 import requests
 import redis
-from PIL import Image, ImageFilter
 
 from telegram import (
     Update,
@@ -52,14 +49,7 @@ session = requests.Session()
 # =========================
 
 PENDING_REPLIES: Dict[Tuple[int, int], float] = {}
-PENDING_ACTIONS: Dict[Tuple[int, int], str] = {}
 REPLY_TIMEOUT = 900  # 15 minutos
-
-# =========================
-# CONFIG STORY
-# =========================
-STORY_SIZE = (1080, 1920)
-STORY_FRONT_RATIO = 0.70
 
 # =========================
 # LOGGING
@@ -157,103 +147,6 @@ def sanitize(text: Any) -> str:
 
 def esc(text: Any) -> str:
     return html.escape(sanitize(text))
-
-# =========================
-# PROCESSAMENTO DE IMAGEM (PROXY MULTI-API + LOCAL)
-# =========================
-
-def _cover_candidates(track: Dict[str, Any]) -> List[str]:
-    album = track.get("album") or {}
-    urls = [
-        album.get("cover_xl"),
-        album.get("cover_big"),
-        album.get("cover_medium"),
-    ]
-    return [str(u) for u in urls if u]
-
-def _render_story_image(track: Dict[str, Any]) -> Optional[bytes]:
-    cover_url = None
-    for url in _cover_candidates(track):
-        if url:
-            cover_url = url
-            break
-            
-    if not cover_url:
-        return None
-
-    bg_w, bg_h = STORY_SIZE # 1080x1920
-    fg_size = int(bg_w * STORY_FRONT_RATIO) # 756x756
-
-    try:
-        # COMBINAÇÃO CLEVER DE APIs: Usamos APIs de Proxy públicas gratuitas como rota 
-        # de fuga caso o Deezer bloqueie nosso IP primário.
-        
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
-        }
-        
-        encoded_url = urllib.parse.quote(cover_url, safe="")
-        
-        # Cascata de APIs: Tenta a mais rápida primeiro. Se falhar, usa proxys.
-        sources = [
-            cover_url, # 1. Direto
-            f"https://corsproxy.io/?{encoded_url}", # 2. API Proxy 1
-            f"https://api.allorigins.win/raw?url={encoded_url}", # 3. API Proxy 2
-        ]
-        
-        img_data = None
-        for source_url in sources:
-            try:
-                r = requests.get(source_url, headers=headers, timeout=8)
-                r.raise_for_status()
-                img_data = r.content
-                break # Sucesso, sai do loop
-            except Exception as e:
-                logger.warning(f"Falha ao buscar capa por {source_url}: {e}")
-                continue
-        
-        if not img_data:
-            logger.error("Todas as APIs e rotas de proxy falharam ao buscar a capa.")
-            return None
-
-        # Agora aplicamos a lógica visual (que antes dependia do instável wsrv.nl)
-        orig_img = Image.open(io.BytesIO(img_data)).convert("RGB")
-        orig_w, orig_h = orig_img.size
-
-        # --- FUNDO BLUR ---
-        target_ratio = bg_w / bg_h
-        orig_ratio = orig_w / orig_h
-
-        if orig_ratio > target_ratio:
-            new_w = int(orig_h * target_ratio)
-            offset = (orig_w - new_w) // 2
-            crop_box = (offset, 0, offset + new_w, orig_h)
-        else:
-            new_h = int(orig_w / target_ratio)
-            offset = (orig_h - new_h) // 2
-            crop_box = (0, offset, orig_w, offset + new_h)
-
-        resample_filter = getattr(Image, 'Resampling', Image).LANCZOS
-        
-        bg_img = orig_img.crop(crop_box).resize((bg_w, bg_h), resample_filter)
-        bg_img = bg_img.filter(ImageFilter.GaussianBlur(radius=45))
-
-        # --- FRENTE NÍTIDA ---
-        fg_img = orig_img.resize((fg_size, fg_size), resample_filter)
-
-        # --- COLAGEM FINAL ---
-        y_offset = (bg_h - fg_size) // 2
-        x_offset = (bg_w - fg_size) // 2
-        
-        bg_img.paste(fg_img, (x_offset, y_offset))
-        
-        buffer = io.BytesIO()
-        bg_img.save(buffer, format="JPEG", quality=90)
-        return buffer.getvalue()
-
-    except Exception as e:
-        logger.error("Falha interna na geração nativa do Story: %s", e)
-        return None
 
 # =========================
 # HELPERS DE LAYOUT
@@ -515,17 +408,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📌 Comandos:\n"
         f"/charts — suas músicas mais ouvidas\n"
         f"/top — ranking global\n"
-        f"/play — enviar uma música pelo grupo\n"
-        f"/story — gerar story da música"
+        f"/play – enviar uma música pelo grupo"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 # =========================
-# BUSCA NORMAL E DIRETA
+# BUSCA NORMAL
 # =========================
 
-async def show_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str, mode: str = "play"):
-    query = (query or "").strip()
+async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = (update.message.text or "").strip()
     if not query:
         await update.message.reply_text("🎤 Digite o nome de uma música.")
         return
@@ -546,11 +438,10 @@ async def show_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE
             title = sanitize(t.get("title"))
             artist = sanitize((t.get("artist") or {}).get("name"))
 
-            # Passando o modo (play ou story) para o botão
             keyboard.append([
                 InlineKeyboardButton(
                     f"🎵 {title} — {artist}",
-                    callback_data=f"{mode}:{track_id}"
+                    callback_data=f"play:{track_id}"
                 )
             ])
         except Exception as e:
@@ -561,74 +452,6 @@ async def show_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE, mode: str = "play"):
-    query = (update.message.text or "").strip()
-    if not query:
-        await update.message.reply_text("🎤 Digite o nome de uma música.")
-        return
-    await show_search_results(update, context, query, mode)
-
-async def _direct_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE, mode: str):
-    chat = update.effective_chat
-    user = update.effective_user
-    now = time.time()
-
-    if chat.type in ["group", "supergroup"]:
-        key = (chat.id, user.id)
-        cleanup_pending(now)
-        PENDING_REPLIES[key] = now
-        PENDING_ACTIONS[key] = mode
-
-        await update.message.reply_text(
-            "🎧Responda aqui o nome de uma música ou use "
-            f"{BOT_USERNAME} para pesquisar <i>inline</i>",
-            parse_mode=ParseMode.HTML
-        )
-        return
-
-    query = " ".join(context.args).strip()
-    if not query:
-        await update.message.reply_text("🎤 Digite o nome de uma música.")
-        return
-
-    await show_search_results(update, context, query, mode)
-
-async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await _direct_search_command(update, context, mode="play")
-
-async def _story_group_prompt(message) -> None:
-    await message.reply_text(
-        "🎧Responda aqui o nome de uma música para gerar o story ou use "
-        f"{BOT_USERNAME} para pesquisar <i>inline</i>",
-        parse_mode=ParseMode.HTML
-    )
-
-async def _story_private_search(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str) -> None:
-    if not query:
-        await update.message.reply_text("🎤 Use /story nome da música.")
-        return
-    await show_search_results(update, context, query, mode="story")
-
-async def story(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if not msg:
-        return
-
-    chat = update.effective_chat
-    user = update.effective_user
-    now = time.time()
-    cleanup_pending(now)
-
-    if chat.type in ["group", "supergroup"]:
-        key = (chat.id, user.id)
-        PENDING_REPLIES[key] = now
-        PENDING_ACTIONS[key] = "story"
-        await _story_group_prompt(msg)
-        return
-
-    query = " ".join(context.args).strip()
-    await _story_private_search(update, context, query)
-
 # =========================
 # NOVO: GRUPO EXCLUSIVO
 # =========================
@@ -637,7 +460,6 @@ def cleanup_pending(now: float) -> None:
     expired = [k for k, ts in PENDING_REPLIES.items() if now - ts > REPLY_TIMEOUT]
     for k in expired:
         PENDING_REPLIES.pop(k, None)
-        PENDING_ACTIONS.pop(k, None)
 
 async def group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -656,7 +478,7 @@ async def group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (msg.text or "").strip()
 
-    is_command = text.startswith("/play") or text.startswith("/story")
+    is_command = text.startswith("/play")
     is_mention = BOT_USERNAME.lower() in text.lower()
 
     is_reply_to_bot = (
@@ -667,7 +489,6 @@ async def group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if is_command or is_mention:
         PENDING_REPLIES[key] = now
-        PENDING_ACTIONS[key] = "story" if text.startswith("/story") else "play"
         await msg.reply_text(
             "🎧Responda aqui o nome de uma música ou use "
             f"{BOT_USERNAME} para pesquisar <i>inline</i>",
@@ -678,16 +499,66 @@ async def group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_reply_to_bot and key in PENDING_REPLIES:
         if now - PENDING_REPLIES[key] > REPLY_TIMEOUT:
             PENDING_REPLIES.pop(key, None)
-            mode = PENDING_ACTIONS.pop(key, "play")
-            await msg.reply_text(f"⏱️ Tempo expirado. Use /{mode} novamente.")
+            await msg.reply_text("⏱️ Tempo expirado. Use /play novamente.")
             return
 
-        mode = PENDING_ACTIONS.pop(key, "play")
         PENDING_REPLIES.pop(key, None)
-        await search_music(update, context, mode)
+        await search_music(update, context)
         return
 
     return
+
+async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    now = time.time()
+
+    if chat.type in ["group", "supergroup"]:
+        key = (chat.id, user.id)
+        cleanup_pending(now)
+        PENDING_REPLIES[key] = now
+
+        await update.message.reply_text(
+            "🎧Responda aqui o nome de uma música ou use "
+            f"{BOT_USERNAME} para pesquisar <i>inline</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    query = " ".join(context.args).strip()
+    if not query:
+        await update.message.reply_text("🎤 Digite o nome de uma música.")
+        return
+
+    tracks = await deezer_search(query)
+
+    if not tracks:
+        await update.message.reply_text("🔎 Nada encontrado.")
+        return
+
+    keyboard = []
+
+    for t in tracks[:5]:
+        try:
+            track_id = str(t["id"])
+            remember_track(t)
+
+            title = sanitize(t.get("title"))
+            artist = sanitize((t.get("artist") or {}).get("name"))
+
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"🎵 {title} — {artist}",
+                    callback_data=f"play:{track_id}"
+                )
+            ])
+        except Exception as e:
+            logger.warning("Erro montando botão: %s", e)
+
+    await update.message.reply_text(
+        "🎧 Escolha:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 # =========================
 # CLICK DO CHAT
@@ -698,19 +569,10 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await cb.answer()
 
     try:
-        # Pega a ação e o id no botão que foi clicado
-        data_parts = cb.data.split(":", 1)
-        if len(data_parts) == 2:
-            action, track_id = data_parts
-        else:
-            action = "play"
-            track_id = data_parts[0]
+        track_id = cb.data.split(":", 1)[1]
     except Exception:
         await cb.answer("⚠️ Ação inválida.", show_alert=True)
         return
-
-    if action not in {"play", "story"}:
-        action = "play"
 
     try:
         t = await resolve_track(track_id)
@@ -735,7 +597,6 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = (t.get("album") or {}).get("cover_big")
 
     try:
-        # Envio principal sempre acontece
         if photo:
             await cb.message.reply_photo(
                 photo=photo,
@@ -748,29 +609,8 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True
             )
-
-        # Processamento blindado do Story
-        if action == "story":
-            msg_status = await cb.message.reply_text("⏳ <i>Gerando imagem do Story, aguarde...</i>", parse_mode=ParseMode.HTML)
-            
-            try:
-                story_bytes = await asyncio.to_thread(_render_story_image, t)
-                
-                if story_bytes:
-                    await cb.message.reply_photo(photo=story_bytes)
-                else:
-                    await cb.message.reply_text("⚠️ Não foi possível gerar o story. Bloqueio de rede no acesso à capa.")
-            except Exception as e:
-                logger.error("Erro interno no Story: %s", e)
-                await cb.message.reply_text("⚠️ Erro ao processar a imagem do Story.")
-            finally:
-                try:
-                    await msg_status.delete()
-                except Exception:
-                    pass
-
     except Exception as e:
-        logger.warning("Falha ao enviar publicação: %s", e)
+        logger.warning("Falha ao enviar música: %s", e)
         await cb.message.reply_text(
             caption,
             parse_mode=ParseMode.HTML,
@@ -1045,7 +885,6 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("play", play))
-    app.add_handler(CommandHandler("story", story))
     app.add_handler(CommandHandler("charts", stats))
     app.add_handler(CommandHandler("top", top))
     app.add_handler(CommandHandler("log", log_cmd))
