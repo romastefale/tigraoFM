@@ -1030,7 +1030,8 @@ def story_render_image(
     card_w = 860
     cover_size = 760
     padding = 50
-    card_h = padding + cover_size + 240
+    # Aumentamos de 240 para 290 para dar mais espaço (respiro) abaixo do bot
+    card_h = padding + cover_size + 290
 
     card_x = (W - card_w) // 2
     card_y = (H - card_h) // 2
@@ -1059,9 +1060,9 @@ def story_render_image(
 
     text_x = card_x + padding
     
-    # Distribuição proporcional das 3 linhas dentro do espaço de 240px inferior
+    # Distribuição das 3 linhas (mantemos o início em 40px abaixo da capa)
     current_y = card_y + padding + cover_size + 40
-    line_spacing = 65
+    line_spacing = 68 # Aumentei de 65 para 68 para dar um leve respiro extra entre as linhas também
 
     # Linha 1: "usuario esta ouvindo"
     listening_text = f"{_truncate(user_name, 20)} está ouvindo..."
@@ -1095,8 +1096,8 @@ def story_render_image(
             logger.warning("Erro ao carregar logo.png: %s", e)
 
     if logo_drawn:
-        text_offset_x = text_x + logo_size + 12 # Espaço após o ícone
-        text_offset_y = current_y + (logo_size - 32) // 2 # Centralizando na vertical (32 é o tamanho da fonte do bot)
+        text_offset_x = text_x + logo_size + 12
+        text_offset_y = current_y + (logo_size - 32) // 2
         draw.text((text_offset_x, text_offset_y), bot_name_clean, fill=text_bot, font=font_bot)
     else:
         draw.text((text_x, current_y), bot_name_clean, fill=text_bot, font=font_bot)
