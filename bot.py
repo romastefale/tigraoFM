@@ -8,6 +8,8 @@ import time
 import base64
 import shutil
 import unicodedata
+import uuid
+import atexit
 from io import BytesIO
 from datetime import datetime
 from pathlib import Path
@@ -52,6 +54,15 @@ STORY_CACHE_DIR = Path(os.getenv("STORY_CACHE_DIR", os.path.join(BACKUP_PATH, "s
 STORY_BACKUP_DIR = Path(os.getenv("STORY_BACKUP_DIR", os.path.join(BACKUP_PATH, "story_backup")))
 
 BASE_DIR = Path(__file__).resolve().parent
+
+LOCK_FILE_PATH = Path(os.getenv("BOT_LOCK_FILE", os.path.join(BACKUP_PATH, "tigraoFMbot.lock")))
+INSTANCE_LOCK_KEY = "tigraoFMbot:instance_lock"
+INSTANCE_LOCK_TOKEN = str(uuid.uuid4())
+INSTANCE_LOCK_TTL = 90
+INSTANCE_LOCK_RENEW_INTERVAL = 30
+INSTANCE_LOCK_ACQUIRED = False
+LOCK_FILE_HANDLE = None
+BACKGROUND_TASKS: List[asyncio.Task] = []
 
 session = requests.Session()
 
@@ -126,6 +137,91 @@ def connect_redis() -> None:
         redis_client = None
 
 connect_redis()
+
+# =========================
+# SINGLE INSTANCE LOCK
+# =========================
+
+def acquire_instance_lock() -> bool:
+    global INSTANCE_LOCK_ACQUIRED, LOCK_FILE_HANDLE
+
+    if redis_client:
+        try:
+            if redis_client.set(INSTANCE_LOCK_KEY, INSTANCE_LOCK_TOKEN, nx=True, ex=INSTANCE_LOCK_TTL):
+                INSTANCE_LOCK_ACQUIRED = True
+                logger.info("Instance lock acquired via Redis ✅")
+                return True
+
+            owner = _redis_text(redis_client.get(INSTANCE_LOCK_KEY))
+            logger.error("Outra instância do bot já está ativa (Redis lock). token_atual=%s", owner[:12] if owner else "unknown")
+            return False
+        except Exception as e:
+            logger.warning("Não foi possível usar lock no Redis: %s", e)
+
+    try:
+        LOCK_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        LOCK_FILE_HANDLE = open(LOCK_FILE_PATH, "a+")
+        try:
+            import fcntl
+            fcntl.flock(LOCK_FILE_HANDLE, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except ImportError as e:
+            logger.error("fcntl indisponível; não foi possível garantir lock exclusivo: %s", e)
+            return False
+
+        LOCK_FILE_HANDLE.seek(0)
+        LOCK_FILE_HANDLE.truncate()
+        LOCK_FILE_HANDLE.write(f"{os.getpid()}\n")
+        LOCK_FILE_HANDLE.flush()
+        INSTANCE_LOCK_ACQUIRED = True
+        logger.info("Instance lock acquired via file ✅")
+        return True
+    except Exception as e:
+        logger.error("Outra instância do bot já está ativa (file lock). %s", e)
+        return False
+
+
+def release_instance_lock() -> None:
+    global INSTANCE_LOCK_ACQUIRED, LOCK_FILE_HANDLE
+
+    if redis_client and INSTANCE_LOCK_ACQUIRED:
+        try:
+            current = _redis_text(redis_client.get(INSTANCE_LOCK_KEY))
+            if current == INSTANCE_LOCK_TOKEN:
+                redis_client.delete(INSTANCE_LOCK_KEY)
+        except Exception as e:
+            logger.warning("Falha ao liberar lock no Redis: %s", e)
+
+    if LOCK_FILE_HANDLE is not None:
+        try:
+            try:
+                import fcntl
+                fcntl.flock(LOCK_FILE_HANDLE, fcntl.LOCK_UN)
+            except Exception:
+                pass
+            LOCK_FILE_HANDLE.close()
+        except Exception:
+            pass
+        finally:
+            LOCK_FILE_HANDLE = None
+
+    INSTANCE_LOCK_ACQUIRED = False
+
+
+async def instance_lock_renew_task() -> None:
+    while True:
+        await asyncio.sleep(INSTANCE_LOCK_RENEW_INTERVAL)
+        if not redis_client or not INSTANCE_LOCK_ACQUIRED:
+            continue
+        try:
+            current = _redis_text(redis_client.get(INSTANCE_LOCK_KEY))
+            if current == INSTANCE_LOCK_TOKEN:
+                redis_client.expire(INSTANCE_LOCK_KEY, INSTANCE_LOCK_TTL)
+            else:
+                logger.error("Lock Redis perdido; encerrando renovação.")
+                return
+        except Exception as e:
+            logger.warning("Falha ao renovar lock no Redis: %s", e)
+
 
 # =========================
 # SANITIZE / TRADUÇÃO
@@ -1722,17 +1818,30 @@ async def redis_monitor_task():
             connect_redis()
 
 async def post_init(application: Application):
-    application.create_task(redis_backup_task())
-    application.create_task(stats_export_task())
-    application.create_task(redis_monitor_task())
+    if not acquire_instance_lock():
+        raise RuntimeError("Outra instância do bot já está rodando.")
+
+    BACKGROUND_TASKS.clear()
+    BACKGROUND_TASKS.append(asyncio.create_task(redis_backup_task()))
+    BACKGROUND_TASKS.append(asyncio.create_task(stats_export_task()))
+    BACKGROUND_TASKS.append(asyncio.create_task(redis_monitor_task()))
+    BACKGROUND_TASKS.append(asyncio.create_task(instance_lock_renew_task()))
     logger.info("Tarefas automáticas iniciadas")
+
+async def post_shutdown(application: Application):
+    for task in list(BACKGROUND_TASKS):
+        task.cancel()
+    if BACKGROUND_TASKS:
+        await asyncio.gather(*BACKGROUND_TASKS, return_exceptions=True)
+    BACKGROUND_TASKS.clear()
+    release_instance_lock()
 
 # =========================
 # ERROS
 # =========================
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error("ERRO:", exc_info=context.error)
+    logger.error("ERRO não tratado: %s", context.error, exc_info=context.error)
 
 # =========================
 # MAIN
@@ -1745,7 +1854,6 @@ def main():
     app = (
         Application.builder()
         .token(TOKEN)
-        .post_init(post_init)
         .build()
     )
 
@@ -1768,8 +1876,10 @@ def main():
     app.add_error_handler(error_handler)
 
     logger.info("BOT ONLINE 🚀")
-    app.run_polling()
+    app.run_polling(post_init=post_init, post_shutdown=post_shutdown)
 
+
+atexit.register(release_instance_lock)
 
 if __name__ == "__main__":
     main()
