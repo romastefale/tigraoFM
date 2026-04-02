@@ -512,18 +512,23 @@ def _musicbrainz_search_sync(query: str) -> Optional[Dict[str, Any]]:
         logger.warning("story MusicBrainz falhou: %s", e)
         return None
 
+# =========================
+# STORY CACHE
+# =========================
 
 try:
     RESAMPLE_LANCZOS = Image.Resampling.LANCZOS
 except AttributeError:
     RESAMPLE_LANCZOS = Image.LANCZOS
 
-FONT_REGULAR = str(BASE_DIR / "DejaVuSans.ttf")
-FONT_BOLD = str(BASE_DIR / "DejaVuSans-Bold.ttf")
+try:
+    TRANSPOSE = Image.Transpose
+except AttributeError:
+    TRANSPOSE = Image
 
-# =========================
-# STORY CACHE
-# =========================
+# Configuração da Fonte Inter
+FONT_REGULAR = str(BASE_DIR / "Inter-Regular.ttf")
+FONT_BOLD = str(BASE_DIR / "Inter-Bold.ttf")
 
 def _slugify(text: Any, max_len: int = 72) -> str:
     value = sanitize(text)
@@ -532,12 +537,10 @@ def _slugify(text: Any, max_len: int = 72) -> str:
     value = re.sub(r"[^a-z0-9]+", "-", value).strip("-")
     return value[:max_len] if value else "unknown"
 
-
 def _safe_track_id(track_id: Any) -> str:
     value = str(track_id or "").strip()
     value = re.sub(r"[^A-Za-z0-9_.-]", "_", value)
     return value or "unknown"
-
 
 def _story_track_tag(track: Dict[str, Any]) -> str:
     track_id = _safe_track_id(track.get("id"))
@@ -545,10 +548,8 @@ def _story_track_tag(track: Dict[str, Any]) -> str:
     artist = _slugify((track.get("artist") or {}).get("name") or "unknown")
     return f"{track_id}__{title}__{artist}"
 
-
 def _story_bundle_dir(base: Path, track_id: Any, theme: str) -> Path:
     return base / f"{_safe_track_id(track_id)}_{theme}"
-
 
 def _story_bundle_paths(track_id: Any, theme: str) -> Dict[str, Path]:
     cache_dir = _story_bundle_dir(STORY_CACHE_DIR, track_id, theme)
@@ -562,12 +563,11 @@ def _story_bundle_paths(track_id: Any, theme: str) -> Dict[str, Path]:
         "backup_meta": backup_dir / "meta.json",
     }
 
-
 def _load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
     candidates = [
         Path(FONT_BOLD if bold else FONT_REGULAR),
-        BASE_DIR / ("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"),
-        Path.cwd() / ("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"),
+        BASE_DIR / ("Inter-Bold.ttf" if bold else "Inter-Regular.ttf"),
+        Path.cwd() / ("Inter-Bold.ttf" if bold else "Inter-Regular.ttf"),
     ]
     for candidate in candidates:
         try:
@@ -577,13 +577,11 @@ def _load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
             continue
     return ImageFont.load_default()
 
-
 def _truncate(text: Any, max_len: int) -> str:
     text = sanitize(text)
     if len(text) <= max_len:
         return text
     return text[: max_len - 3].rstrip() + "..."
-
 
 def _download_image(url: str) -> Optional[Image.Image]:
     if not url:
@@ -600,7 +598,6 @@ def _download_image(url: str) -> Optional[Image.Image]:
     except Exception as e:
         logger.warning("Falha ao baixar imagem %s: %s", url, e)
         return None
-
 
 def _make_placeholder_cover(track: Dict[str, Any]) -> Image.Image:
     title = sanitize(track.get("title") or "Unknown")
@@ -669,7 +666,6 @@ def _make_placeholder_cover(track: Dict[str, Any]) -> Image.Image:
 
     return img.convert("RGB")
 
-
 def story_cache_get(track_id: Any, theme: str) -> Optional[Path]:
     track_id = _safe_track_id(track_id)
     paths = _story_bundle_paths(track_id, theme)
@@ -698,7 +694,6 @@ def story_cache_get(track_id: Any, theme: str) -> Optional[Path]:
             logger.warning("story_cache_get redis falhou: %s", e)
 
     return None
-
 
 def story_cache_set(
     track: Dict[str, Any],
@@ -804,7 +799,7 @@ def story_render_image(
         text_artist = (160, 160, 160, 255)
         text_bot = (190, 190, 190, 255)
 
-    # 1. Fundo Desfocado (Limpo e sem faixas escuras extras)
+    # 1. Fundo Desfocado
     bg = ImageOps.fit(cover, (W, H), method=RESAMPLE_LANCZOS, centering=(0.5, 0.5))
     bg = bg.filter(ImageFilter.GaussianBlur(45))
     bg = ImageEnhance.Brightness(bg).enhance(bg_brightness).convert("RGBA")
@@ -1069,7 +1064,7 @@ async def story_reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     title = _truncate(track.get("title") or "Unknown", 30)
     artist = _truncate((track.get("artist") or {}).get("name") or "Unknown", 30)
 
-    # Novo: Manda o teclado de escolha de tema
+    # Envia os botões de seleção de Tema
     keyboard = [
         [
             InlineKeyboardButton("Modo Claro ⚪️", callback_data=f"story_theme:light:{track_id}"),
@@ -1083,7 +1078,7 @@ async def story_reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-# Novo: Processador do Clique no Botão de Tema
+
 async def story_theme_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cb = update.callback_query
     await cb.answer()
@@ -1116,7 +1111,6 @@ async def story_theme_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                 logger.warning("Falha ao enviar cache story %s: %s", track_id, e)
 
         try:
-            # Resolve novamente os dados da track (Rápido pois já estará no redis do resolve_track)
             track = await resolve_track(track_id)
             cover = await story_fetch_cover(track)
             user_name = update.effective_user.first_name or "Usuário"
@@ -1586,7 +1580,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
     user_first_name = update.effective_user.first_name
-    entries = redis_client.zrevrange(
+    entries: List[Tuple[str, float]] = redis_client.zrevrange(
         f"top:user:{user_id}",
         0,
         9,
@@ -1605,8 +1599,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     for i, ((track_id, score), meta) in enumerate(zip(entries, metas), 1):
-        track_id_str = _redis_text(track_id)
-        title = sanitize(meta.get("title") or f"Track {track_id_str}")
+        title = sanitize(meta.get("title") or f"Track {track_id}")
         artist = sanitize(meta.get("artist") or "Unknown")
 
         lines.append(f"{i}. 🎧 <b>{esc(title)}</b>")
@@ -1630,7 +1623,7 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Redis indisponível.")
         return
 
-    entries = redis_client.zrevrange(
+    entries: List[Tuple[str, float]] = redis_client.zrevrange(
         "top:tracks",
         0,
         9,
@@ -1649,8 +1642,7 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     for i, ((track_id, score), meta) in enumerate(zip(entries, metas), 1):
-        track_id_str = _redis_text(track_id)
-        title = sanitize(meta.get("title") or f"Track {track_id_str}")
+        title = sanitize(meta.get("title") or f"Track {track_id}")
         artist = sanitize(meta.get("artist") or "Unknown")
 
         lines.append(f"{i}. 🎧 <b>{esc(title)}</b>")
@@ -1680,7 +1672,6 @@ def _chunk_text(text: str, limit: int = 3800) -> List[str]:
         start += limit
     return parts
 
-
 async def log_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or update.effective_user.id != ADMIN_ID:
         return
@@ -1707,7 +1698,6 @@ async def redis_backup_task():
         except Exception as e:
             logger.error("Falha no backup diário: %s", e)
 
-
 async def stats_export_task():
     while True:
         await asyncio.sleep(86400)
@@ -1716,7 +1706,6 @@ async def stats_export_task():
                 await export_stats_to_disk()
         except Exception as e:
             logger.error("Falha no export diário de stats: %s", e)
-
 
 async def redis_monitor_task():
     while True:
@@ -1731,7 +1720,6 @@ async def redis_monitor_task():
         except Exception as e:
             logger.warning("Monitor Redis detectou falha: %s", e)
             connect_redis()
-
 
 async def post_init(application: Application):
     application.create_task(redis_backup_task())
@@ -1772,7 +1760,6 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS, group_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, search_music))
 
-    # Importante: Padronizar e separar os Callbacks para que não batam cabeça
     app.add_handler(CallbackQueryHandler(story_theme_callback, pattern=r"^story_theme:"))
     app.add_handler(CallbackQueryHandler(click, pattern=r"^play:"))
     
