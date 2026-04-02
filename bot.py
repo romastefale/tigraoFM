@@ -1244,6 +1244,61 @@ async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg or not update.effective_chat or not update.effective_user:
         return
 
+    # 1. Verifica se o comando foi enviado como resposta a uma mensagem
+    if msg.reply_to_message:
+        target_msg = msg.reply_to_message
+        query_text = (target_msg.text or target_msg.caption or "").strip()
+
+        # 2. Se for uma mensagem do próprio bot com o layout de música, extrai título e artista
+        if target_msg.from_user and target_msg.from_user.id == context.bot.id:
+            if "🎧" in query_text and "🎤" in query_text:
+                title, artist = "", ""
+                for line in query_text.split('\n'):
+                    if "🎧" in line:
+                        title = line.replace("🎧", "").strip()
+                    elif "🎤" in line:
+                        artist = line.replace("🎤", "").strip()
+                query_text = f"{title} {artist}".strip()
+
+        # 3. Se obteve algum texto válido da mensagem respondida, pula direto para a busca
+        if query_text:
+            normalized_query = normalize_query(query_text, 200)
+            if normalized_query:
+                tracks = await deezer_search(normalized_query)
+                
+                if tracks is None:
+                    await msg.reply_text("⚠️ Erro ao acessar o serviço de busca. Tente novamente.")
+                    return
+                    
+                if not tracks:
+                    await msg.reply_text("🔎 Nenhuma música encontrada com esse nome.")
+                    return
+
+                ranked = rank_tracks(normalized_query, tracks)
+                keyboard = []
+                
+                for score, t in ranked[:5]:
+                    track_id = str(t["id"])
+                    t_title = _truncate(t.get("title") or "Unknown", 30)
+                    t_artist = _truncate((t.get("artist") or {}).get("name") or "Unknown", 30)
+                    keyboard.append([
+                        InlineKeyboardButton(
+                            f"🎵 {t_title} — {t_artist}",
+                            callback_data=f"story_select:{track_id}"
+                        )
+                    ])
+
+                if not keyboard:
+                    await msg.reply_text("🔎 Nenhuma correspondência válida encontrada.")
+                    return
+
+                await msg.reply_text(
+                    "🎧 Qual destas músicas você quer no seu Story?",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+                return
+
+    # 4. Comportamento padrão: se não for resposta a uma mensagem, pede a música
     prompt = await msg.reply_text(
         "🎵 Responda esta mensagem com o nome da música para o Story.",
         parse_mode=ParseMode.HTML,
