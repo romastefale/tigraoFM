@@ -1209,7 +1209,10 @@ async def story_theme_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         try:
             track = await resolve_track(track_id)
             cover = await story_fetch_cover(track)
-            user_name = update.effective_user.first_name or "Usuário"
+            
+            user = update.effective_user
+            raw_name = f"@{user.username}" if user.username else (user.first_name or "Usuário")
+            user_name = sanitize(raw_name)
 
             image_bytes = await asyncio.to_thread(
                 story_render_image,
