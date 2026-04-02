@@ -85,6 +85,9 @@ STORY_CACHE_TTL_SECONDS = 60 * 60 * 24 * 30
 # locks para evitar duplicidade de render/lookup da mesma música
 STORY_RENDER_LOCKS: Dict[str, asyncio.Lock] = {}
 
+# limiar objetivo para aceitar uma correspondência do /story
+STORY_MIN_MATCH_SCORE = 4.5
+
 # =========================
 # LOGGING
 # =========================
@@ -248,6 +251,116 @@ def normalize_query(value: Any, max_len: int = 200) -> str:
 
     return text
 
+def normalize_text_basic(text: Any) -> str:
+    if text is None:
+        return ""
+    text = str(text).strip()
+    if not text:
+        return ""
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = re.sub(r"\s+", " ", text).strip().lower()
+    return text
+
+
+def tokenize(text: Any) -> List[str]:
+    text_norm = normalize_text_basic(text)
+    if not text_norm:
+        return []
+    return [tok for tok in re.split(r"[^a-z0-9]+", text_norm) if tok]
+
+
+def score_track_match(query: str, track: Dict[str, Any]) -> float:
+    q_norm = normalize_text_basic(query)
+    q_tokens = tokenize(query)
+
+    title = normalize_text_basic(track.get("title") or "")
+    artist = normalize_text_basic((track.get("artist") or {}).get("name") or "")
+    album = normalize_text_basic((track.get("album") or {}).get("title") or "")
+    meta = normalize_text_basic(track.get("_meta_search_text") or "")
+
+    score = 0.0
+
+    if not q_norm:
+        return 0.0
+
+    # correspondência exata / forte
+    if q_norm == title:
+        score += 12.0
+    if q_norm == artist:
+        score += 4.0
+    if q_norm == meta and meta:
+        score += 8.0
+
+    if q_norm in title:
+        score += 7.0
+    if q_norm in artist:
+        score += 4.5
+    if q_norm in album:
+        score += 1.0
+    if meta and q_norm in meta:
+        score += 5.0
+
+    # bônus por tokens
+    if q_tokens:
+        title_hits = sum(1 for tok in q_tokens if tok in title)
+        artist_hits = sum(1 for tok in q_tokens if tok in artist)
+        meta_hits = sum(1 for tok in q_tokens if tok in meta)
+
+        score += title_hits * 1.6
+        score += artist_hits * 1.0
+        score += meta_hits * 0.4
+
+        if title_hits == len(q_tokens):
+            score += 2.5
+        if artist_hits == len(q_tokens):
+            score += 1.0
+
+        # cobre casos "nome da música artista"
+        if all((tok in title or tok in artist or tok in meta) for tok in q_tokens):
+            score += 2.0
+
+    # pequeno bônus por track id se digitado explicitamente
+    track_id = normalize_text_basic(track.get("id") or "")
+    if track_id and q_norm == track_id:
+        score += 10.0
+    elif track_id and q_norm and q_norm in track_id:
+        score += 1.0
+
+    return score
+
+
+def rank_tracks(query: str, tracks: List[Dict[str, Any]]) -> List[Tuple[float, Dict[str, Any]]]:
+    ranked: List[Tuple[float, Dict[str, Any]]] = []
+    for t in tracks or []:
+        try:
+            score = score_track_match(query, t)
+            ranked.append((score, t))
+        except Exception as e:
+            logger.warning("Falha ao pontuar track: %s", e)
+
+    ranked.sort(
+        key=lambda item: (
+            item[0],
+            normalize_text_basic(item[1].get("title") or ""),
+            normalize_text_basic((item[1].get("artist") or {}).get("name") or ""),
+        ),
+        reverse=True,
+    )
+    return ranked
+
+
+def select_best_track(query: str, tracks: List[Dict[str, Any]], min_score: float = STORY_MIN_MATCH_SCORE) -> Optional[Dict[str, Any]]:
+    ranked = rank_tracks(query, tracks)
+    if not ranked:
+        return None
+    best_score, best_track = ranked[0]
+    if best_score < min_score:
+        return None
+    best_track["_match_score"] = best_score
+    return best_track
+
+
 def translate_sync(text: str) -> str:
     try:
         r = session.get(
@@ -322,11 +435,19 @@ def build_caption(title: Any, artist: Any, plays: int, user_first_name: Optional
 
 
 def build_track_meta(track: Dict[str, Any]) -> Dict[str, str]:
+    title = str(track.get("title") or "Unknown")
+    artist = str((track.get("artist") or {}).get("name") or "Unknown")
+    meta_search_text = f"{title} {artist}".strip()
+
     return {
-        "title": str(track.get("title") or "Unknown"),
-        "artist": str((track.get("artist") or {}).get("name") or "Unknown"),
+        "title": title,
+        "artist": artist,
         "cover_big": str((track.get("album") or {}).get("cover_big") or ""),
         "cover_small": str((track.get("album") or {}).get("cover_small") or ""),
+        "title_norm": normalize_text_basic(title),
+        "artist_norm": normalize_text_basic(artist),
+        "meta_search_text": normalize_text_basic(meta_search_text),
+        "source": str(track.get("source") or "deezer"),
     }
 
 
@@ -408,6 +529,10 @@ async def fetch_track_meta(track_id: str) -> Dict[str, str]:
         "artist": "Unknown",
         "cover_big": "",
         "cover_small": "",
+        "title_norm": "",
+        "artist_norm": "",
+        "meta_search_text": "",
+        "source": "unknown",
     }
 
 
@@ -441,7 +566,7 @@ async def deezer_search(query: str):
         r = await asyncio.to_thread(
             session.get,
             "https://api.deezer.com/search",
-            params={"q": query},
+            params={"q": query, "limit": 10},
             timeout=6,
         )
         r.raise_for_status()
@@ -815,6 +940,7 @@ def story_cache_set(
         "bot_name": BOT_DISPLAY_NAME,
         "created_at": datetime.utcnow().isoformat() + "Z",
         "image_size": len(image_bytes),
+        "search_text": normalize_text_basic(f"{track.get('title') or ''} {(track.get('artist') or {}).get('name') or ''}"),
     }
 
     tmp_cache = paths["cache_image"].with_suffix(".tmp")
@@ -904,7 +1030,7 @@ def story_render_image(
     card_w = 860
     cover_size = 760
     padding = 50
-    card_h = padding + cover_size + 240 
+    card_h = padding + cover_size + 240
 
     card_x = (W - card_w) // 2
     card_y = (H - card_h) // 2
@@ -926,7 +1052,7 @@ def story_render_image(
 
     # 6. Textos
     draw = ImageDraw.Draw(bg)
-    
+
     font_listening = _load_font(42, bold=True)
     font_track = _load_font(38, bold=False)
     font_bot = _load_font(32, bold=False)
@@ -935,7 +1061,7 @@ def story_render_image(
     current_y = card_y + padding + cover_size + 35
 
     # Linha 1: "usuario esta ouvindo"
-    listening_text = f"{_truncate(user_name, 20)} está ouvindo"
+    listening_text = f"{_truncate(user_name, 20)} está ouvindo..."
     draw.text((text_x, current_y), listening_text, fill=text_listening, font=font_listening)
     current_y += 55
 
@@ -1030,22 +1156,34 @@ async def story_fetch_track(query: str) -> Optional[Dict[str, Any]]:
     if not cleaned:
         return None
 
+    # 1) Deezer como fonte principal
     tracks = await deezer_search(cleaned)
     if tracks:
-        track = tracks[0]
-        if track and track.get("id"):
+        ranked = rank_tracks(cleaned, tracks)
+        if ranked:
+            best_score, best = ranked[0]
+            if best.get("id") and best_score >= STORY_MIN_MATCH_SCORE:
+                best["_match_score"] = best_score
+                remember_track(best)
+                return best
+
+    # 2) iTunes como fallback com ranking interno
+    track = await asyncio.to_thread(_itunes_search_sync, cleaned)
+    if track and track.get("id"):
+        score = score_track_match(cleaned, track)
+        if score >= STORY_MIN_MATCH_SCORE:
+            track["_match_score"] = score
             remember_track(track)
             return track
 
-    track = await asyncio.to_thread(_itunes_search_sync, cleaned)
-    if track and track.get("id"):
-        remember_track(track)
-        return track
-
+    # 3) MusicBrainz como fallback final
     track = await asyncio.to_thread(_musicbrainz_search_sync, cleaned)
     if track and track.get("id"):
-        remember_track(track)
-        return track
+        score = score_track_match(cleaned, track)
+        if score >= STORY_MIN_MATCH_SCORE:
+            track["_match_score"] = score
+            remember_track(track)
+            return track
 
     return None
 
@@ -1152,6 +1290,17 @@ async def story_reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         tracks_probe = await deezer_search(normalized_query)
         if tracks_probe is None:
             await msg.reply_text("⚠️ Erro ao acessar Deezer. Tente novamente.")
+        elif tracks_probe:
+            ranked_probe = rank_tracks(normalized_query, tracks_probe)
+            suggestions = []
+            for score, t in ranked_probe[:3]:
+                title = sanitize(t.get("title"))
+                artist = sanitize((t.get("artist") or {}).get("name"))
+                suggestions.append(f"• {title} — {artist}")
+            await msg.reply_text(
+                "🔎 Não foi possível determinar a música com confiança.\n\n"
+                "Sugestões:\n" + "\n".join(suggestions)
+            )
         else:
             await msg.reply_text("🔎 Música não encontrada.")
         return
@@ -1185,7 +1334,7 @@ async def story_theme_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     chat_id = update.effective_chat.id
-    
+
     try:
         await cb.edit_message_text("⏳ <i>Gerando seu story, aguarde...</i>", parse_mode=ParseMode.HTML)
     except Exception:
@@ -1195,7 +1344,7 @@ async def story_theme_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     safe_id = _safe_track_id(track_id)
     query_lock_key = f"story_{safe_id}_{theme}"
-    
+
     async with _get_story_lock(query_lock_key):
         cached = await asyncio.to_thread(story_cache_get, track_id, theme)
         if cached:
@@ -1209,7 +1358,7 @@ async def story_theme_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         try:
             track = await resolve_track(track_id)
             cover = await story_fetch_cover(track)
-            
+
             user = update.effective_user
             raw_name = f"@{user.username}" if user.username else (user.first_name or "Usuário")
             user_name = sanitize(raw_name)
@@ -1234,7 +1383,7 @@ async def story_theme_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                            or ""),
                 user_name=user_name,
             )
-            
+
             await cb.message.delete()
             await context.bot.send_photo(chat_id=chat_id, photo=str(cached_path))
         except Exception as e:
@@ -1369,6 +1518,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # BUSCA NORMAL
 # =========================
 
+def _format_track_button_text(track: Dict[str, Any]) -> str:
+    title = sanitize(track.get("title"))
+    artist = sanitize((track.get("artist") or {}).get("name"))
+    return f"🎵 {title} — {artist}"
+
+
+def _build_track_keyboard(tracks: List[Dict[str, Any]], query: str, limit: int = 5) -> List[List[InlineKeyboardButton]]:
+    ranked = rank_tracks(query, tracks)
+    keyboard: List[List[InlineKeyboardButton]] = []
+
+    for score, t in ranked[:limit]:
+        try:
+            track_id = str(t["id"])
+            remember_track(t)
+            keyboard.append([
+                InlineKeyboardButton(
+                    _format_track_button_text(t),
+                    callback_data=f"play:{track_id}"
+                )
+            ])
+        except Exception as e:
+            logger.warning("Erro montando botão: %s", e)
+
+    return keyboard
+
+
 async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = (update.message.text or "").strip()
     if not query:
@@ -1385,24 +1560,11 @@ async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔎 Nada encontrado.")
         return
 
-    keyboard = []
+    keyboard = _build_track_keyboard(tracks, query, limit=5)
 
-    for t in tracks[:5]:
-        try:
-            track_id = str(t["id"])
-            remember_track(t)
-
-            title = sanitize(t.get("title"))
-            artist = sanitize((t.get("artist") or {}).get("name"))
-
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"🎵 {title} — {artist}",
-                    callback_data=f"play:{track_id}"
-                )
-            ])
-        except Exception as e:
-            logger.warning("Erro montando botão: %s", e)
+    if not keyboard:
+        await update.message.reply_text("🔎 Nada encontrado.")
+        return
 
     await update.message.reply_text(
         "🎧 Escolha:",
@@ -1499,24 +1661,11 @@ async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔎 Nada encontrado.")
         return
 
-    keyboard = []
+    keyboard = _build_track_keyboard(tracks, query, limit=5)
 
-    for t in tracks[:5]:
-        try:
-            track_id = str(t["id"])
-            remember_track(t)
-
-            title = sanitize(t.get("title"))
-            artist = sanitize((t.get("artist") or {}).get("name"))
-
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"🎵 {title} — {artist}",
-                    callback_data=f"play:{track_id}"
-                )
-            ])
-        except Exception as e:
-            logger.warning("Erro montando botão: %s", e)
+    if not keyboard:
+        await update.message.reply_text("🔎 Nada encontrado.")
+        return
 
     await update.message.reply_text(
         "🎧 Escolha:",
@@ -1596,7 +1745,9 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     results = []
 
-    for t in tracks[:10]:
+    ranked = rank_tracks(query, tracks)
+
+    for score, t in ranked[:10]:
         try:
             track_id = str(t["id"])
             title = sanitize(t.get("title"))
@@ -1876,7 +2027,7 @@ def main():
 
     app.add_handler(CallbackQueryHandler(story_theme_callback, pattern=r"^story_theme:"))
     app.add_handler(CallbackQueryHandler(click, pattern=r"^play:"))
-    
+
     app.add_handler(InlineQueryHandler(inline_query))
     app.add_handler(ChosenInlineResultHandler(chosen_inline))
     app.add_error_handler(error_handler)
