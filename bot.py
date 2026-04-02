@@ -1058,12 +1058,15 @@ def story_render_image(
     font_bot = _load_font(32, bold=False)
 
     text_x = card_x + padding
-    current_y = card_y + padding + cover_size + 35
+    
+    # Distribuição proporcional das 3 linhas dentro do espaço de 240px inferior
+    current_y = card_y + padding + cover_size + 40
+    line_spacing = 65
 
     # Linha 1: "usuario esta ouvindo"
     listening_text = f"{_truncate(user_name, 20)} está ouvindo..."
     draw.text((text_x, current_y), listening_text, fill=text_listening, font=font_listening)
-    current_y += 55
+    current_y += line_spacing
 
     # Linha 2: "nome da música - artista"
     title = _truncate(track.get("title") or "Unknown", 25)
@@ -1074,11 +1077,29 @@ def story_render_image(
 
     draw.text((text_x, current_y), title, fill=text_title, font=font_track)
     draw.text((text_x + title_w, current_y), f" – {artist}", fill=text_artist, font=font_track)
-    current_y += 55
+    current_y += line_spacing
 
-    # Linha 3: "tigraoFMbot"
-    bot_name_clean = BOT_USERNAME.replace("@", "")
-    draw.text((text_x, current_y), bot_name_clean, fill=text_bot, font=font_bot)
+    # Linha 3: Logo (Opcional) e Nome do Bot
+    bot_name_clean = "tigraoFMbot"
+    logo_path = BASE_DIR / "logo.png"
+    logo_size = 38
+    logo_drawn = False
+
+    if logo_path.exists():
+        try:
+            logo_img = Image.open(logo_path).convert("RGBA")
+            logo_img = logo_img.resize((logo_size, logo_size), RESAMPLE_LANCZOS)
+            bg.alpha_composite(logo_img, (text_x, current_y))
+            logo_drawn = True
+        except Exception as e:
+            logger.warning("Erro ao carregar logo.png: %s", e)
+
+    if logo_drawn:
+        text_offset_x = text_x + logo_size + 12 # Espaço após o ícone
+        text_offset_y = current_y + (logo_size - 32) // 2 # Centralizando na vertical (32 é o tamanho da fonte do bot)
+        draw.text((text_offset_x, text_offset_y), bot_name_clean, fill=text_bot, font=font_bot)
+    else:
+        draw.text((text_x, current_y), bot_name_clean, fill=text_bot, font=font_bot)
 
     # 7. Exportar Imagem
     out = BytesIO()
