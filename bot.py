@@ -171,54 +171,20 @@ def normalize_text_basic(text: Any) -> str:
     text = re.sub(r"\s+", " ", text).strip().lower()
     return text
 
-
-
-
-def normalize_query(value: Any, max_len: int = 200) -> str:
-    if value is None:
-        return ""
-
-    text = str(value).strip()
-    if not text:
-        return ""
-
-    text = unicodedata.normalize("NFKC", text)
-    text = "".join(ch for ch in text if ch.isprintable())
-    text = re.sub(r"\s+", " ", text).strip()
-
-    if max_len and len(text) > max_len:
-        text = text[:max_len].rstrip()
-
-    return text
-
 def tokenize(text: Any) -> List[str]:
     text_norm = normalize_text_basic(text)
     if not text_norm:
         return []
     return [tok for tok in re.split(r"[^a-z0-9]+", text_norm) if tok]
 
-
-
-
-def _track_search_text(track: Dict[str, Any]) -> str:
-    title = str(track.get("title") or "")
-    artist = str((track.get("artist") or {}).get("name") or "")
-    album = str((track.get("album") or {}).get("title") or "")
-    stored_meta = str(track.get("_meta_search_text") or "")
-
-    combined = " ".join(part for part in [stored_meta, title, artist, album] if part).strip()
-    return normalize_text_basic(combined)
-
-
 def score_track_match(query: str, track: Dict[str, Any]) -> float:
-    q_text = normalize_query(query)
-    q_norm = normalize_text_basic(q_text)
-    q_tokens = tokenize(q_text)
+    q_norm = normalize_text_basic(query)
+    q_tokens = tokenize(query)
 
     title = normalize_text_basic(track.get("title") or "")
     artist = normalize_text_basic((track.get("artist") or {}).get("name") or "")
     album = normalize_text_basic((track.get("album") or {}).get("title") or "")
-    meta = _track_search_text(track)
+    meta = normalize_text_basic(track.get("_meta_search_text") or "")
 
     score = 0.0
 
@@ -229,51 +195,34 @@ def score_track_match(query: str, track: Dict[str, Any]) -> float:
         score += 12.0
     if q_norm == artist:
         score += 4.0
-    if q_norm == album:
-        score += 2.0
     if q_norm == meta and meta:
         score += 8.0
 
-    if title.startswith(q_norm):
-        score += 2.0
-    if artist.startswith(q_norm):
-        score += 1.0
-    if album.startswith(q_norm):
-        score += 0.5
-
     if q_norm in title:
-        score += 7.5
+        score += 7.0
     if q_norm in artist:
         score += 4.5
     if q_norm in album:
-        score += 1.2
+        score += 1.0
     if meta and q_norm in meta:
         score += 5.0
 
     if q_tokens:
         title_hits = sum(1 for tok in q_tokens if tok in title)
         artist_hits = sum(1 for tok in q_tokens if tok in artist)
-        album_hits = sum(1 for tok in q_tokens if tok in album)
         meta_hits = sum(1 for tok in q_tokens if tok in meta)
 
-        score += title_hits * 1.8
-        score += artist_hits * 1.1
-        score += album_hits * 0.5
+        score += title_hits * 1.6
+        score += artist_hits * 1.0
         score += meta_hits * 0.4
 
         if title_hits == len(q_tokens):
             score += 2.5
         if artist_hits == len(q_tokens):
             score += 1.0
-        if album_hits == len(q_tokens):
-            score += 0.7
 
-        if all((tok in title or tok in artist or tok in album or tok in meta) for tok in q_tokens):
+        if all((tok in title or tok in artist or tok in meta) for tok in q_tokens):
             score += 2.0
-
-        joined = " ".join(q_tokens)
-        if joined and joined in meta:
-            score += 1.5
 
     track_id = normalize_text_basic(track.get("id") or "")
     if track_id and q_norm == track_id:
@@ -283,19 +232,10 @@ def score_track_match(query: str, track: Dict[str, Any]) -> float:
 
     return score
 
-
 def rank_tracks(query: str, tracks: List[Dict[str, Any]]) -> List[Tuple[float, Dict[str, Any]]]:
     ranked: List[Tuple[float, Dict[str, Any]]] = []
-    seen_ids = set()
-
     for t in tracks or []:
         try:
-            track_id = str(t.get("id") or "")
-            if track_id and track_id in seen_ids:
-                continue
-            if track_id:
-                seen_ids.add(track_id)
-
             score = score_track_match(query, t)
             ranked.append((score, t))
         except Exception as e:
@@ -310,21 +250,6 @@ def rank_tracks(query: str, tracks: List[Dict[str, Any]]) -> List[Tuple[float, D
         reverse=True,
     )
     return ranked
-
-
-
-
-def select_best_track(query: str, tracks: List[Dict[str, Any]], min_score: float = 0.0) -> Optional[Dict[str, Any]]:
-    ranked = rank_tracks(query, tracks)
-    if not ranked:
-        return None
-
-    best_score, best_track = ranked[0]
-    if best_score < min_score:
-        return None
-
-    best_track["_match_score"] = best_score
-    return best_track
 
 def _resample_lanczos():
     return getattr(Image, "Resampling", Image).LANCZOS
@@ -451,26 +376,16 @@ def build_caption(title: Any, artist: Any, plays: int, user_first_name: Optional
         f"<i>🔁 {plays} Plays</i>"
     )
 
-
 def build_track_meta(track: Dict[str, Any]) -> Dict[str, str]:
     album = track.get("album") or {}
-    title = str(track.get("title") or "Unknown")
-    artist = str((track.get("artist") or {}).get("name") or "Unknown")
-    album_title = str(album.get("title") or "")
-    meta_search_text = " ".join(part for part in [title, artist, album_title] if part).strip()
-
     return {
-        "title": title,
-        "artist": artist,
+        "title": str(track.get("title") or "Unknown"),
+        "artist": str((track.get("artist") or {}).get("name") or "Unknown"),
         "cover": str(album.get("cover") or ""),
         "cover_small": str(album.get("cover_small") or ""),
         "cover_medium": str(album.get("cover_medium") or ""),
         "cover_big": str(album.get("cover_big") or ""),
         "cover_xl": str(album.get("cover_xl") or ""),
-        "title_norm": normalize_text_basic(title),
-        "artist_norm": normalize_text_basic(artist),
-        "meta_search_text": normalize_text_basic(meta_search_text),
-        "source": str(track.get("source") or "deezer"),
     }
 
 def remember_track(track: Dict[str, Any]) -> None:
@@ -518,7 +433,6 @@ def register_play(user_id: int, track: Dict[str, Any]) -> int:
         logger.warning("Falha ao registrar play: %s", e)
         return 0
 
-
 async def fetch_track_meta(track_id: str) -> Dict[str, str]:
     if redis_client:
         try:
@@ -547,12 +461,7 @@ async def fetch_track_meta(track_id: str) -> Dict[str, str]:
         "cover_medium": "",
         "cover_big": "",
         "cover_xl": "",
-        "title_norm": "",
-        "artist_norm": "",
-        "meta_search_text": "",
-        "source": "unknown",
     }
-
 
 async def resolve_track(track_id: str) -> Dict[str, Any]:
     track = await deezer_track(track_id)
@@ -574,9 +483,12 @@ async def resolve_track(track_id: str) -> Dict[str, Any]:
         }
     }
 
+# =========================
+# DEEZER
+# =========================
 
 async def deezer_search(query: str):
-    query = normalize_query(query)
+    query = (query or "").strip()
     if not query:
         return []
 
@@ -584,12 +496,11 @@ async def deezer_search(query: str):
         r = await asyncio.to_thread(
             session.get,
             "https://api.deezer.com/search",
-            params={"q": query, "limit": 10},
+            params={"q": query},
             timeout=6,
         )
         r.raise_for_status()
-        data = r.json()
-        return data.get("data", [])
+        return r.json().get("data", [])
     except Exception as e:
         logger.warning("Erro Deezer search: %s", e)
         return []
