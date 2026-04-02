@@ -69,10 +69,6 @@ REPLY_TIMEOUT = 900  # 15 minutos
 STORY_PENDING_BY_PROMPT: Dict[Tuple[int, int], Dict[str, Any]] = {}
 STORY_PENDING_BY_USER: Dict[Tuple[int, int], int] = {}
 STORY_TIMEOUT = 900  # 15 minutos
-STORY_IMAGE_SIZE = (1080, 1920)
-STORY_FOREGROUND_SIZE = 780
-STORY_BG_BLUR = 28
-STORY_BG_DARKEN = 0.42
 STORY_CACHE_TTL_SECONDS = 60 * 60 * 24 * 30
 
 # locks para evitar duplicidade de render/lookup da mesma música
@@ -374,7 +370,7 @@ async def deezer_track(track_id: str):
         return None
 
 # =========================
-# STORY CACHE
+# INTEGRAÇÃO CAPAS
 # =========================
 
 def _score_itunes_result(query: str, item: Dict[str, Any]) -> float:
@@ -522,14 +518,12 @@ try:
 except AttributeError:
     RESAMPLE_LANCZOS = Image.LANCZOS
 
-try:
-    TRANSPOSE = Image.Transpose
-except AttributeError:
-    TRANSPOSE = Image
-
 FONT_REGULAR = str(BASE_DIR / "DejaVuSans.ttf")
 FONT_BOLD = str(BASE_DIR / "DejaVuSans-Bold.ttf")
 
+# =========================
+# STORY CACHE
+# =========================
 
 def _slugify(text: Any, max_len: int = 72) -> str:
     value = sanitize(text)
@@ -552,13 +546,13 @@ def _story_track_tag(track: Dict[str, Any]) -> str:
     return f"{track_id}__{title}__{artist}"
 
 
-def _story_bundle_dir(base: Path, track_id: Any) -> Path:
-    return base / _safe_track_id(track_id)
+def _story_bundle_dir(base: Path, track_id: Any, theme: str) -> Path:
+    return base / f"{_safe_track_id(track_id)}_{theme}"
 
 
-def _story_bundle_paths(track_id: Any) -> Dict[str, Path]:
-    cache_dir = _story_bundle_dir(STORY_CACHE_DIR, track_id)
-    backup_dir = _story_bundle_dir(STORY_BACKUP_DIR, track_id)
+def _story_bundle_paths(track_id: Any, theme: str) -> Dict[str, Path]:
+    cache_dir = _story_bundle_dir(STORY_CACHE_DIR, track_id, theme)
+    backup_dir = _story_bundle_dir(STORY_BACKUP_DIR, track_id, theme)
     return {
         "cache_dir": cache_dir,
         "backup_dir": backup_dir,
@@ -591,18 +585,6 @@ def _truncate(text: Any, max_len: int) -> str:
     return text[: max_len - 3].rstrip() + "..."
 
 
-def _format_duration(seconds: Any) -> str:
-    try:
-        total = int(seconds or 0)
-    except Exception:
-        total = 0
-    if total <= 0:
-        return ""
-    minutes = total // 60
-    sec = total % 60
-    return f"{minutes}:{sec:02d}"
-
-
 def _download_image(url: str) -> Optional[Image.Image]:
     if not url:
         return None
@@ -620,44 +602,13 @@ def _download_image(url: str) -> Optional[Image.Image]:
         return None
 
 
-def _load_avatar_image(avatar_bytes: Optional[bytes], size: int = 96) -> Image.Image:
-    if avatar_bytes:
-        try:
-            img = Image.open(BytesIO(avatar_bytes))
-            img.load()
-            img = ImageOps.exif_transpose(img).convert("RGBA")
-            img = ImageOps.fit(img, (size, size), method=RESAMPLE_LANCZOS, centering=(0.5, 0.5))
-            return img
-        except Exception as e:
-            logger.warning("Falha ao carregar avatar do bot: %s", e)
-
-    avatar = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(avatar)
-    draw.ellipse((0, 0, size - 1, size - 1), fill=(28, 28, 28, 255))
-    note_font = _load_font(int(size * 0.45), bold=True)
-    label = "♫"
-    bbox = draw.textbbox((0, 0), label, font=note_font)
-    tw = bbox[2] - bbox[0]
-    th = bbox[3] - bbox[1]
-    draw.text(((size - tw) / 2, (size - th) / 2 - 4), label, font=note_font, fill=(255, 255, 255, 235))
-    return avatar
-
-
 def _make_placeholder_cover(track: Dict[str, Any]) -> Image.Image:
     title = sanitize(track.get("title") or "Unknown")
     artist = sanitize((track.get("artist") or {}).get("name") or "Unknown")
     seed = f"{track.get('id', '')}:{title}:{artist}"
     h = abs(hash(seed))
-    c1 = (
-        40 + (h % 140),
-        30 + ((h // 7) % 140),
-        50 + ((h // 13) % 140),
-    )
-    c2 = (
-        10 + ((h // 17) % 90),
-        10 + ((h // 23) % 90),
-        10 + ((h // 29) % 90),
-    )
+    c1 = (40 + (h % 140), 30 + ((h // 7) % 140), 50 + ((h // 13) % 140))
+    c2 = (10 + ((h // 17) % 90), 10 + ((h // 23) % 90), 10 + ((h // 29) % 90))
 
     size = (1200, 1200)
     img = Image.new("RGB", size, c1)
@@ -719,9 +670,9 @@ def _make_placeholder_cover(track: Dict[str, Any]) -> Image.Image:
     return img.convert("RGB")
 
 
-def story_cache_get(track_id: Any) -> Optional[Path]:
+def story_cache_get(track_id: Any, theme: str) -> Optional[Path]:
     track_id = _safe_track_id(track_id)
-    paths = _story_bundle_paths(track_id)
+    paths = _story_bundle_paths(track_id, theme)
 
     if paths["cache_image"].exists() and paths["cache_image"].is_file() and paths["cache_image"].stat().st_size > 0:
         return paths["cache_image"]
@@ -738,7 +689,7 @@ def story_cache_get(track_id: Any) -> Optional[Path]:
 
     if redis_client:
         try:
-            raw_path = redis_client.get(f"story:cache:{track_id}")
+            raw_path = redis_client.get(f"story:cache:{track_id}_{theme}")
             if raw_path:
                 candidate = Path(_redis_text(raw_path))
                 if candidate.exists() and candidate.is_file() and candidate.stat().st_size > 0:
@@ -752,28 +703,25 @@ def story_cache_get(track_id: Any) -> Optional[Path]:
 def story_cache_set(
     track: Dict[str, Any],
     image_bytes: bytes,
+    theme: str,
     *,
     cover_url: str = "",
     user_name: str = "",
-    bot_avatar_present: bool = False,
 ) -> Path:
     track_id = _safe_track_id(track.get("id"))
-    paths = _story_bundle_paths(track_id)
+    paths = _story_bundle_paths(track_id, theme)
     paths["cache_dir"].mkdir(parents=True, exist_ok=True)
     paths["backup_dir"].mkdir(parents=True, exist_ok=True)
 
     meta: Dict[str, Any] = {
         "track_id": track_id,
+        "theme": theme,
         "tag": _story_track_tag(track),
         "title": sanitize(track.get("title")),
         "artist": sanitize((track.get("artist") or {}).get("name")),
-        "album": sanitize((track.get("album") or {}).get("title")),
-        "duration": int(track.get("duration") or 0),
-        "duration_human": _format_duration(track.get("duration")),
         "cover_url": cover_url,
         "user_name": sanitize(user_name),
         "bot_name": BOT_DISPLAY_NAME,
-        "bot_avatar_present": bool(bot_avatar_present),
         "created_at": datetime.utcnow().isoformat() + "Z",
         "image_size": len(image_bytes),
     }
@@ -785,18 +733,23 @@ def story_cache_set(
     tmp_cache.replace(paths["cache_image"])
     tmp_backup.replace(paths["backup_image"])
 
+    def _write_json(path: Path, payload: Dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+
     _write_json(paths["cache_meta"], meta)
     _write_json(paths["backup_meta"], meta)
 
     if redis_client:
         try:
             redis_client.set(
-                f"story:cache:{track_id}",
+                f"story:cache:{track_id}_{theme}",
                 str(paths["cache_image"]),
                 ex=STORY_CACHE_TTL_SECONDS,
             )
             redis_client.set(
-                f"story:meta:{track_id}",
+                f"story:meta:{track_id}_{theme}",
                 json.dumps(meta, ensure_ascii=False),
                 ex=STORY_CACHE_TTL_SECONDS,
             )
@@ -830,116 +783,87 @@ def story_render_image(
     track: Dict[str, Any],
     cover_image: Image.Image,
     user_name: str,
-    bot_avatar_bytes: Optional[bytes],
+    theme: str = "light",
 ) -> bytes:
     cover = ImageOps.exif_transpose(cover_image).convert("RGB")
-
     W, H = 1080, 1920
+
+    # Configuração de Cores para Modo Claro vs Modo Escuro
+    if theme == "dark":
+        bg_brightness = 0.40
+        card_bg = (28, 28, 28, 245)
+        text_listening = (255, 255, 255, 255)
+        text_title = (240, 240, 240, 255)
+        text_artist = (160, 160, 160, 255)
+        text_bot = (120, 120, 120, 255)
+    else:
+        bg_brightness = 0.90
+        card_bg = (255, 255, 255, 245)
+        text_listening = (0, 0, 0, 255)
+        text_title = (40, 40, 40, 255)
+        text_artist = (160, 160, 160, 255)
+        text_bot = (190, 190, 190, 255)
+
+    # 1. Fundo Desfocado (Limpo e sem faixas escuras extras)
     bg = ImageOps.fit(cover, (W, H), method=RESAMPLE_LANCZOS, centering=(0.5, 0.5))
-    bg = bg.filter(ImageFilter.GaussianBlur(28))
-    bg = ImageEnhance.Brightness(bg).enhance(0.42).convert("RGBA")
+    bg = bg.filter(ImageFilter.GaussianBlur(45))
+    bg = ImageEnhance.Brightness(bg).enhance(bg_brightness).convert("RGBA")
 
-    overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    od = ImageDraw.Draw(overlay)
-    od.rectangle((0, 0, W, H), fill=(0, 0, 0, 38))
-    od.rectangle((0, 0, W, 290), fill=(0, 0, 0, 60))
-    od.rectangle((0, H - 360, W, H), fill=(0, 0, 0, 88))
-    bg.alpha_composite(overlay)
+    # 2. Medidas do Card e da Capa
+    card_w = 860
+    cover_size = 760
+    padding = 50
+    card_h = padding + cover_size + 240 
 
-    draw = ImageDraw.Draw(bg)
-
-    avatar_size = 92
-    avatar = _load_avatar_image(bot_avatar_bytes, avatar_size)
-    avatar_mask = Image.new("L", (avatar_size, avatar_size), 0)
-    ImageDraw.Draw(avatar_mask).ellipse((0, 0, avatar_size - 1, avatar_size - 1), fill=255)
-
-    header_x = 60
-    header_y = 72
-    bg.paste(avatar, (header_x, header_y), avatar_mask)
-
-    font_bot = _load_font(38, bold=True)
-    font_user = _load_font(30, bold=False)
-
-    text_x = header_x + avatar_size + 22
-    draw.text((text_x, header_y + 4), BOT_DISPLAY_NAME, fill=(255, 255, 255, 240), font=font_bot)
-    draw.text(
-        (text_x, header_y + 50),
-        f"{_truncate(user_name, 24)} está ouvindo",
-        fill=(220, 220, 220, 220),
-        font=font_user,
-    )
-
-    badge_size = 88
-    badge = Image.new("RGBA", (badge_size, badge_size), (0, 0, 0, 0))
-    bd = ImageDraw.Draw(badge)
-    bd.ellipse((0, 0, badge_size - 1, badge_size - 1), fill=(14, 14, 14, 235))
-    note_font = _load_font(44, bold=True)
-    label = "♫"
-    bbox = bd.textbbox((0, 0), label, font=note_font)
-    tw = bbox[2] - bbox[0]
-    th = bbox[3] - bbox[1]
-    bd.text(((badge_size - tw) / 2, (badge_size - th) / 2 - 5), label, font=note_font, fill=(255, 255, 255, 235))
-    bg.alpha_composite(badge, (44, H - 128))
-
-    fg_size = 760
-    fg = ImageOps.fit(cover, (fg_size, fg_size), method=RESAMPLE_LANCZOS, centering=(0.5, 0.5))
-    fg = _rounded_image(fg, 56)
-
-    x = (W - fg_size) // 2
-    y = 300
-
-    _add_shadow(bg, (x - 12, y - 12, x + fg_size + 12, y + fg_size + 12), radius=64)
-    border = Image.new("RGBA", (fg_size + 14, fg_size + 14), (0, 0, 0, 0))
-    bd = ImageDraw.Draw(border)
-    bd.rounded_rectangle((0, 0, border.size[0] - 1, border.size[1] - 1), radius=60, outline=(255, 255, 255, 90), width=4)
-    bg.alpha_composite(border, (x - 7, y - 7))
-    bg.alpha_composite(fg, (x, y))
-
-    card_w = int(W * 0.90)
-    card_h = 230
     card_x = (W - card_w) // 2
-    card_y = H - card_h - 120
+    card_y = (H - card_h) // 2
 
-    card = Image.new("RGBA", (card_w, card_h), (0, 0, 0, 185))
-    mask = Image.new("L", (card_w, card_h), 0)
-    ImageDraw.Draw(mask).rounded_rectangle((0, 0, card_w, card_h), radius=34, fill=255)
-    card.putalpha(mask)
+    # 3. Sombra do Card
+    _add_shadow(bg, (card_x - 15, card_y - 15, card_x + card_w + 15, card_y + card_h + 15), radius=80)
+
+    # 4. Desenhar o Card principal
+    card = Image.new("RGBA", (card_w, card_h), card_bg)
+    card_mask = Image.new("L", (card_w, card_h), 0)
+    ImageDraw.Draw(card_mask).rounded_rectangle((0, 0, card_w, card_h), radius=48, fill=255)
+    card.putalpha(card_mask)
     bg.alpha_composite(card, (card_x, card_y))
 
+    # 5. Colar a Capa do Disco dentro do Card
+    fg = ImageOps.fit(cover, (cover_size, cover_size), method=RESAMPLE_LANCZOS, centering=(0.5, 0.5))
+    fg = _rounded_image(fg, 24)
+    bg.alpha_composite(fg, (card_x + padding, card_y + padding))
+
+    # 6. Textos
     draw = ImageDraw.Draw(bg)
+    
+    font_listening = _load_font(42, bold=True)
+    font_track = _load_font(38, bold=False)
+    font_bot = _load_font(32, bold=False)
 
-    title = _truncate(track.get("title") or "Unknown", 60)
-    artist = _truncate((track.get("artist") or {}).get("name") or "Unknown", 44)
-    album = _truncate((track.get("album") or {}).get("title") or "", 44)
-    duration = _format_duration(track.get("duration"))
+    text_x = card_x + padding
+    current_y = card_y + padding + cover_size + 35
 
-    font_title = _load_font(42, bold=True)
-    font_artist = _load_font(34, bold=False)
-    font_meta = _load_font(28, bold=False)
-    font_time = _load_font(26, bold=False)
+    # Linha 1: "usuario esta ouvindo"
+    listening_text = f"{_truncate(user_name, 20)} está ouvindo"
+    draw.text((text_x, current_y), listening_text, fill=text_listening, font=font_listening)
+    current_y += 55
 
-    pad = 30
-    left_x = card_x + pad
-    top_y = card_y + pad
+    # Linha 2: "nome da música - artista"
+    title = _truncate(track.get("title") or "Unknown", 25)
+    artist = _truncate((track.get("artist") or {}).get("name") or "Unknown", 25)
 
-    draw.text((left_x, top_y), f"🎧 {title}", fill=(255, 255, 255, 245), font=font_title)
-    draw.text((left_x, top_y + 66), f"🎤 {artist}", fill=(225, 225, 225, 235), font=font_artist)
+    title_bbox = draw.textbbox((0, 0), title, font=font_track)
+    title_w = title_bbox[2] - title_bbox[0]
 
-    meta_parts = [part for part in [album, duration] if part]
-    if meta_parts:
-        meta_line = " • ".join(meta_parts)
-        draw.text((left_x, top_y + 116), meta_line, fill=(190, 190, 190, 220), font=font_meta)
+    draw.text((text_x, current_y), title, fill=text_title, font=font_track)
+    draw.text((text_x + title_w, current_y), f" – {artist}", fill=text_artist, font=font_track)
+    current_y += 55
 
-    time_str = datetime.now().strftime("%H:%M")
-    time_bbox = draw.textbbox((0, 0), time_str, font=font_time)
-    time_w = time_bbox[2] - time_bbox[0]
-    draw.text(
-        (card_x + card_w - pad - time_w, card_y + card_h - pad - 6),
-        time_str,
-        fill=(180, 180, 180, 220),
-        font=font_time,
-    )
+    # Linha 3: "tigraoFMbot"
+    bot_name_clean = BOT_USERNAME.replace("@", "")
+    draw.text((text_x, current_y), bot_name_clean, fill=text_bot, font=font_bot)
 
+    # 7. Exportar Imagem
     out = BytesIO()
     bg.convert("RGB").save(out, format="JPEG", quality=92, optimize=True, progressive=True)
     return out.getvalue()
@@ -1000,23 +924,6 @@ class StoryReplyFilter(filters.MessageFilter):
         if time.time() - float(pending.get("ts", 0)) > STORY_TIMEOUT:
             return False
         return True
-
-
-async def story_fetch_bot_avatar(context: ContextTypes.DEFAULT_TYPE) -> Optional[bytes]:
-    try:
-        photos = await context.bot.get_user_profile_photos(context.bot.id, limit=1)
-        if not photos.photos:
-            return None
-
-        file_id = photos.photos[0][-1].file_id
-        file = await context.bot.get_file(file_id)
-
-        bio = BytesIO()
-        await file.download_to_memory(out=bio)
-        return bio.getvalue()
-    except Exception as e:
-        logger.warning("Erro ao obter avatar do bot: %s", e)
-        return None
 
 
 def _get_story_lock(key: str) -> asyncio.Lock:
@@ -1109,7 +1016,7 @@ async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     prompt = await msg.reply_text(
-        "🎵 Responda esta mensagem com o nome da música.",
+        "🎵 Responda esta mensagem com o nome da música para o Story.",
         parse_mode=ParseMode.HTML,
         reply_markup=ForceReply(selective=True),
     )
@@ -1149,69 +1056,101 @@ async def story_reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await msg.reply_text("🎵 Envie um nome de música válido.")
         return
 
-    query_lock_key = f"query:{normalized_query.lower()}"
-    async with _get_story_lock(query_lock_key):
-        track = await story_fetch_track(normalized_query)
-        if track is None or not track.get("id"):
-            tracks_probe = await deezer_search(normalized_query)
-            if tracks_probe is None:
-                await msg.reply_text("⚠️ Erro ao acessar Deezer. Tente novamente.")
-            else:
-                await msg.reply_text("🔎 Música não encontrada.")
-            return
+    track = await story_fetch_track(normalized_query)
+    if track is None or not track.get("id"):
+        tracks_probe = await deezer_search(normalized_query)
+        if tracks_probe is None:
+            await msg.reply_text("⚠️ Erro ao acessar Deezer. Tente novamente.")
+        else:
+            await msg.reply_text("🔎 Música não encontrada.")
+        return
 
-        track_id = _safe_track_id(track.get("id"))
-        cached = await asyncio.to_thread(story_cache_get, track_id)
+    track_id = str(track.get("id") or "")
+    title = _truncate(track.get("title") or "Unknown", 30)
+    artist = _truncate((track.get("artist") or {}).get("name") or "Unknown", 30)
+
+    # Novo: Manda o teclado de escolha de tema
+    keyboard = [
+        [
+            InlineKeyboardButton("Modo Claro ⚪️", callback_data=f"story_theme:light:{track_id}"),
+            InlineKeyboardButton("Modo Escuro ⚫️", callback_data=f"story_theme:dark:{track_id}")
+        ]
+    ]
+
+    await msg.reply_text(
+        f"🎶 Música encontrada: <b>{esc(title)} — {esc(artist)}</b>\n\n🎨 Escolha o tema do card:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# Novo: Processador do Clique no Botão de Tema
+async def story_theme_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cb = update.callback_query
+    await cb.answer()
+
+    try:
+        _, theme, track_id = cb.data.split(":", 2)
+    except ValueError:
+        return
+
+    chat_id = update.effective_chat.id
+    
+    try:
+        await cb.edit_message_text("⏳ <i>Gerando seu story, aguarde...</i>", parse_mode=ParseMode.HTML)
+    except Exception:
+        pass
+
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
+
+    safe_id = _safe_track_id(track_id)
+    query_lock_key = f"story_{safe_id}_{theme}"
+    
+    async with _get_story_lock(query_lock_key):
+        cached = await asyncio.to_thread(story_cache_get, track_id, theme)
         if cached:
             try:
-                await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
-                await msg.reply_photo(photo=str(cached))
+                await cb.message.delete()
+                await context.bot.send_photo(chat_id=chat_id, photo=str(cached))
                 return
             except Exception as e:
                 logger.warning("Falha ao enviar cache story %s: %s", track_id, e)
 
-        track_lock_key = f"track:{track_id}"
-        async with _get_story_lock(track_lock_key):
-            cached = await asyncio.to_thread(story_cache_get, track_id)
-            if cached:
-                try:
-                    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
-                    await msg.reply_photo(photo=str(cached))
-                    return
-                except Exception as e:
-                    logger.warning("Falha ao enviar cache story %s: %s", track_id, e)
+        try:
+            # Resolve novamente os dados da track (Rápido pois já estará no redis do resolve_track)
+            track = await resolve_track(track_id)
+            cover = await story_fetch_cover(track)
+            user_name = update.effective_user.first_name or "Usuário"
 
+            image_bytes = await asyncio.to_thread(
+                story_render_image,
+                track,
+                cover,
+                user_name,
+                theme
+            )
+
+            cached_path = await asyncio.to_thread(
+                story_cache_set,
+                track,
+                image_bytes,
+                theme=theme,
+                cover_url=((track.get("album") or {}).get("cover_xl")
+                           or (track.get("album") or {}).get("cover_big")
+                           or (track.get("album") or {}).get("cover_medium")
+                           or track.get("artwork_url")
+                           or ""),
+                user_name=user_name,
+            )
+            
+            await cb.message.delete()
+            await context.bot.send_photo(chat_id=chat_id, photo=str(cached_path))
+        except Exception as e:
+            logger.warning("Falha ao gerar /story para %s: %s", track_id, e)
             try:
-                await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
-                cover = await story_fetch_cover(track, query=normalized_query)
-                bot_avatar_bytes = await story_fetch_bot_avatar(context)
-                user_name = update.effective_user.first_name or "Usuário"
+                await cb.edit_message_text("⚠️ Não foi possível gerar a imagem.")
+            except Exception:
+                pass
 
-                image_bytes = await asyncio.to_thread(
-                    story_render_image,
-                    track,
-                    cover,
-                    user_name,
-                    bot_avatar_bytes,
-                )
-
-                cached_path = await asyncio.to_thread(
-                    story_cache_set,
-                    track,
-                    image_bytes,
-                    cover_url=((track.get("album") or {}).get("cover_xl")
-                               or (track.get("album") or {}).get("cover_big")
-                               or (track.get("album") or {}).get("cover_medium")
-                               or (track.get("album") or {}).get("cover_small")
-                               or track.get("artwork_url")
-                               or ""),
-                    user_name=user_name,
-                    bot_avatar_present=bool(bot_avatar_bytes),
-                )
-                await msg.reply_photo(photo=str(cached_path))
-            except Exception as e:
-                logger.warning("Falha ao gerar /story para %s: %s", track_id, e)
-                await msg.reply_text("⚠️ Não foi possível gerar a imagem.")
 
 # =========================
 # BACKUP / STATS EXPORT
@@ -1833,7 +1772,10 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS, group_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, search_music))
 
-    app.add_handler(CallbackQueryHandler(click))
+    # Importante: Padronizar e separar os Callbacks para que não batam cabeça
+    app.add_handler(CallbackQueryHandler(story_theme_callback, pattern=r"^story_theme:"))
+    app.add_handler(CallbackQueryHandler(click, pattern=r"^play:"))
+    
     app.add_handler(InlineQueryHandler(inline_query))
     app.add_handler(ChosenInlineResultHandler(chosen_inline))
     app.add_error_handler(error_handler)
