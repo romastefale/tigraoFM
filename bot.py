@@ -1249,18 +1249,49 @@ async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_msg = msg.reply_to_message
         query_text = (target_msg.text or target_msg.caption or "").strip()
 
-        # 2. Se for uma mensagem do próprio bot com o layout de música, extrai título e artista
-        if target_msg.from_user and target_msg.from_user.id == context.bot.id:
-            if "🎧" in query_text and "🎤" in query_text:
-                title, artist = "", ""
-                for line in query_text.split('\n'):
-                    if "🎧" in line:
-                        title = line.replace("🎧", "").strip()
-                    elif "🎤" in line:
-                        artist = line.replace("🎤", "").strip()
-                query_text = f"{title} {artist}".strip()
+        is_own_bot = (
+            (target_msg.from_user and target_msg.from_user.id == context.bot.id) or
+            (target_msg.via_bot and target_msg.via_bot.id == context.bot.id)
+        )
 
-        # 3. Se obteve algum texto válido da mensagem respondida, pula direto para a busca
+        # 2. Se for uma mensagem do próprio bot com o layout de música, extrai título e artista
+        if is_own_bot and "🎧" in query_text and "🎤" in query_text:
+            title, artist = "", ""
+            for line in query_text.split('\n'):
+                if "🎧" in line:
+                    title = line.replace("🎧", "").strip()
+                elif "🎤" in line:
+                    artist = line.replace("🎤", "").strip()
+            
+            # Se conseguiu extrair, faz a busca com a certeza absoluta e vai direto pro tema
+            if title or artist:
+                exact_query = f"{title} {artist}".strip()
+                normalized_query = normalize_query(exact_query, 200)
+                
+                tracks = await deezer_search(normalized_query)
+                if tracks:
+                    ranked = rank_tracks(normalized_query, tracks)
+                    if ranked:
+                        _, best_track = ranked[0]
+                        track_id = str(best_track["id"])
+                        t_title = _truncate(best_track.get("title") or "Unknown", 30)
+                        t_artist = _truncate((best_track.get("artist") or {}).get("name") or "Unknown", 30)
+
+                        keyboard = [
+                            [
+                                InlineKeyboardButton("Modo Claro ⚪️", callback_data=f"story_theme:light:{track_id}"),
+                                InlineKeyboardButton("Modo Escuro ⚫️", callback_data=f"story_theme:dark:{track_id}")
+                            ]
+                        ]
+
+                        await msg.reply_text(
+                            f"🎶 Música detectada: <b>{esc(t_title)} — {esc(t_artist)}</b>\n\n🎨 Escolha o tema do card para gerar a imagem:",
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=InlineKeyboardMarkup(keyboard)
+                        )
+                        return
+        
+        # 3. Se não era do bot ou falhou, usa o texto todo da mensagem respondida como busca e exibe as 5 opções
         if query_text:
             normalized_query = normalize_query(query_text, 200)
             if normalized_query:
@@ -1298,7 +1329,7 @@ async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-    # 4. Comportamento padrão: se não for resposta a uma mensagem, pede a música
+    # 4. Comportamento padrão: se não for resposta a nenhuma mensagem, pede a música
     prompt = await msg.reply_text(
         "🎵 Responda esta mensagem com o nome da música para o Story.",
         parse_mode=ParseMode.HTML,
