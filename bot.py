@@ -23,7 +23,7 @@ from telegram import (
     Update,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    InlineQueryResultPhoto,
+    InlineQueryResultArticle,
     InputTextMessageContent,
     ForceReply,
     Message,
@@ -422,23 +422,28 @@ def _redis_jsonable(value: Any) -> Any:
 # HELPERS DE LAYOUT
 # =========================
 
-def build_message_text(title: Any, artist: Any, plays: int, cover_url: str, user_first_name: Optional[str] = None) -> str:
-    """
-    Novo layout unificado. Cria a mensagem final de texto com preview de imagem no final.
-    O link invisível é inserido ao fim da última linha para evitar quebra no topo.
-    """
+def build_caption(
+    title: Any,
+    artist: Any,
+    plays: int,
+    user_first_name: Optional[str] = None,
+    cover_url: Optional[str] = None,
+) -> str:
+    # Colocar o link web preview no topo evita a quebra de linha visual extra na legenda inferior
+    link = ""
+    if cover_url:
+        safe_cover_url = html.escape(str(cover_url), quote=True)
+        link = f"<a href='{safe_cover_url}'>&#8203;</a>"
+        
     header = ""
     if user_first_name:
         header = f"🎹 {esc(user_first_name)} está ouvindo...\n"
 
-    # Link invisível usando Zero-Width Non-Joiner para renderizar o preview da capa
-    invisible_link = f'<a href="{cover_url}">&#8204;</a>' if cover_url else ""
-
     return (
-        f"{header}"
+        f"{link}{header}"
         f"🎧 <b>{esc(title)}</b>\n"
         f"🎤 <i>{esc(artist)}</i>\n"
-        f"<i>🔁 {plays} Plays</i>{invisible_link}"
+        f"<i>🔁 {plays} Plays</i>"
     )
 
 
@@ -1842,28 +1847,32 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     count = register_play(cb.from_user.id, t)
 
-    photo_url = (t.get("album") or {}).get("cover_big") or ""
-
-    # Usando a nova função central padronizada
-    text_layout = build_message_text(
+    caption = build_caption(
         title=t.get("title"),
         artist=(t.get("artist") or {}).get("name"),
         plays=count,
-        cover_url=photo_url,
         user_first_name=cb.from_user.first_name,
     )
 
+    photo = (t.get("album") or {}).get("cover_big")
+
     try:
-        # Envia sempre como texto (substituindo a antiga checagem de photo com reply_photo).
-        # Assim o preview web funciona garantindo o layout correto com a imagem abaixo da ultima linha
-        await cb.message.reply_text(
-            text=text_layout,
-            parse_mode=ParseMode.HTML
-        )
+        if photo:
+            await cb.message.reply_photo(
+                photo=photo,
+                caption=caption,
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            await cb.message.reply_text(
+                caption,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True
+            )
     except Exception as e:
         logger.warning("Falha ao enviar música: %s", e)
         await cb.message.reply_text(
-            text=text_layout,
+            caption,
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True
         )
@@ -1887,44 +1896,37 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for score, t in ranked[:10]:
         try:
-            track_id = str(t.get("id", ""))
-            if not track_id:
-                continue
-
+            track_id = str(t["id"])
             title = sanitize(t.get("title"))
             artist = sanitize((t.get("artist") or {}).get("name"))
             album_name = sanitize((t.get("album") or {}).get("title") or "Desconhecido")
-            cover_big = (t.get("album") or {}).get("cover_big") or ""
-            cover_small = (t.get("album") or {}).get("cover_small") or cover_big
+            cover_big = (t.get("album") or {}).get("cover_big")
+            cover_small = (t.get("album") or {}).get("cover_small")
 
-            # Trata falta de imagem
             if not cover_big:
                 continue
 
             remember_track(t)
             current_count = get_play_count(user.id, track_id)
 
-            # Gera a mensagem padrão padronizada
-            text_layout = build_message_text(
+            caption = build_caption(
                 title=title,
                 artist=artist,
                 plays=current_count,
-                cover_url=cover_big,
                 user_first_name=user.first_name,
+                cover_url=cover_big,
             )
 
-            # Usando InputTextMessageContent permitimos que o Telegram gere o texto
-            # formatação com o link invisivel puxando o preview
             results.append(
-                InlineQueryResultPhoto(
+                InlineQueryResultArticle(
                     id=f"track:{track_id}",
-                    photo_url=cover_big,
-                    thumbnail_url=cover_small,
-                    title=title,
-                    description=f"- {album_name} – {artist}",
+                    title=f"🎵 {title}",
+                    description=f"{artist} — {album_name}",
+                    thumbnail_url=cover_small or cover_big,
                     input_message_content=InputTextMessageContent(
-                        message_text=text_layout,
-                        parse_mode=ParseMode.HTML
+                        message_text=caption,
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=False
                     )
                 )
             )
@@ -2193,4 +2195,3 @@ atexit.register(release_instance_lock)
 
 if __name__ == "__main__":
     main()
-
