@@ -230,6 +230,13 @@ def score_track_match(query: str, track: Dict[str, Any]) -> float:
     elif track_id and q_norm and q_norm in track_id:
         score += 1.0
 
+    # CRÍTICO: Bônus de Popularidade Nativo do Deezer
+    # O rank vai de 0 a 1.000.000. Dá um bônus de até +10 pontos 
+    # garantindo que as famosas esmaguem as obscuras!
+    rank = track.get("rank", 0)
+    if isinstance(rank, int):
+        score += (rank / 100000.0)
+
     return score
 
 def rank_tracks(query: str, tracks: List[Dict[str, Any]]) -> List[Tuple[float, Dict[str, Any]]]:
@@ -496,7 +503,7 @@ async def deezer_search(query: str):
         r = await asyncio.to_thread(
             session.get,
             "https://api.deezer.com/search",
-            params={"q": query},
+            params={"q": query, "limit": 15},  # Restaurado com limite otimizado para pegar as top!
             timeout=6,
         )
         r.raise_for_status()
