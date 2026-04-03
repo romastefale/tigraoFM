@@ -230,9 +230,6 @@ def score_track_match(query: str, track: Dict[str, Any]) -> float:
     elif track_id and q_norm and q_norm in track_id:
         score += 1.0
 
-    # CRÍTICO: Bônus de Popularidade Nativo do Deezer
-    # O rank vai de 0 a 1.000.000. Dá um bônus de até +10 pontos 
-    # garantindo que as famosas esmaguem as obscuras!
     rank = track.get("rank", 0)
     if isinstance(rank, int):
         score += (rank / 100000.0)
@@ -371,16 +368,20 @@ def _render_story_image(track: Dict[str, Any]) -> Optional[bytes]:
 # HELPERS DE LAYOUT
 # =========================
 
-def build_caption(title: Any, artist: Any, plays: int, user_first_name: Optional[str] = None) -> str:
+def build_caption(title: Any, artist: Any, plays: int, user_first_name: Optional[str] = None, cover_url: Optional[str] = None) -> str:
+    # O link invisível fica colado ao início para não gerar a quebra de linha extra no topo
+    link = f"<a href='{cover_url}'>&#8203;</a>" if cover_url else ""
+    
     header = ""
     if user_first_name:
         header = f"🎹 {esc(user_first_name)} está ouvindo...\n"
 
+    # Layout padronizado para todas as formas de envio do bot
     return (
-        f"{header}"
+        f"{link}{header}"
         f"🎧 <b>{esc(title)}</b>\n"
         f"🎤 <i>{esc(artist)}</i>\n"
-        f"<i>🔁 {plays} Plays</i>"
+        f"🔁 {plays} Plays"
     )
 
 def build_track_meta(track: Dict[str, Any]) -> Dict[str, str]:
@@ -503,7 +504,7 @@ async def deezer_search(query: str):
         r = await asyncio.to_thread(
             session.get,
             "https://api.deezer.com/search",
-            params={"q": query, "limit": 15},  # Restaurado com limite otimizado para pegar as top!
+            params={"q": query, "limit": 15},
             timeout=6,
         )
         r.raise_for_status()
@@ -839,33 +840,35 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     count = register_play(cb.from_user.id, t)
 
-    caption = build_caption(
-        title=t.get("title"),
-        artist=(t.get("artist") or {}).get("name"),
-        plays=count,
-        user_first_name=cb.from_user.first_name,
-    )
-
     cover_urls = _cover_candidates(t)
-    photo = cover_urls[0] if cover_urls else (t.get("album") or {}).get("cover_big")
+    photo_url = cover_urls[0] if cover_urls else (t.get("album") or {}).get("cover_big")
 
     try:
-        if photo:
-            await cb.message.reply_photo(
-                photo=photo,
-                caption=caption,
-                parse_mode=ParseMode.HTML
+        if action == "play":
+            caption = build_caption(
+                title=t.get("title"),
+                artist=(t.get("artist") or {}).get("name"),
+                plays=count,
+                user_first_name=cb.from_user.first_name,
+                cover_url=photo_url
             )
-        else:
+            
             await cb.message.reply_text(
-                caption,
+                text=caption,
                 parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True
+                disable_web_page_preview=False
             )
 
-        if action == "story":
-            msg_status = await cb.message.reply_text("⏳ <i>Gerando imagem do Story, aguarde...</i>", parse_mode=ParseMode.HTML)
+        elif action == "story":
+            caption = build_caption(
+                title=t.get("title"),
+                artist=(t.get("artist") or {}).get("name"),
+                plays=count,
+                user_first_name=cb.from_user.first_name,
+                cover_url=None 
+            )
             
+            msg_status = await cb.message.reply_text("⏳ <i>Gerando imagem do Story, aguarde...</i>", parse_mode=ParseMode.HTML)
             story_bytes = await asyncio.to_thread(_render_story_image, t)
             
             await msg_status.delete()
@@ -873,13 +876,17 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if story_bytes:
                 await cb.message.reply_photo(
                     photo=story_bytes,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML
                 )
             else:
                 await cb.message.reply_text("⚠️ Não foi possível gerar o story.")
+                
     except Exception as e:
-        logger.warning("Falha ao enviar música: %s", e)
+        logger.warning("Falha ao enviar música/story: %s", e)
+        fallback_caption = build_caption(t.get("title"), (t.get("artist") or {}).get("name"), count, cb.from_user.first_name, None)
         await cb.message.reply_text(
-            caption,
+            fallback_caption,
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True
         )
@@ -923,6 +930,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 artist=artist,
                 plays=current_count,
                 user_first_name=user.first_name,
+                cover_url=cover_big
             )
 
             results.append(
@@ -932,7 +940,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     description=f"{artist} — {album_name}",
                     thumbnail_url=cover_small or cover_big,
                     input_message_content=InputTextMessageContent(
-                        message_text=f"<a href='{cover_big}'>&#8203;</a>\n{caption}",
+                        message_text=caption,
                         parse_mode=ParseMode.HTML,
                         disable_web_page_preview=False
                     )
