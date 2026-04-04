@@ -424,19 +424,26 @@ def build_caption(
     plays: int,
     user_first_name: Optional[str] = None,
     cover_url: Optional[str] = None,
+    track_id: Optional[str] = None,
 ) -> str:
-    # Colocar o link web preview no topo evita a quebra de linha visual extra na legenda inferior
-    link = ""
+    # Colocar os links no topo evita a quebra de linha visual extra na legenda inferior
+    links = []
     if cover_url:
         safe_cover_url = html.escape(str(cover_url), quote=True)
-        link = f"<a href='{safe_cover_url}'>&#8203;</a>\n"
+        links.append(f"<a href='{safe_cover_url}'>&#8203;</a>")
+        
+    if track_id:
+        safe_track_url = f"https://www.deezer.com/track/{html.escape(str(track_id))}"
+        links.append(f"<a href='{safe_track_url}'>&#8203;</a>")
+        
+    link_str = "".join(links) + "\n" if links else ""
         
     header = ""
     if user_first_name:
         header = f"🎹 {esc(user_first_name)} está ouvindo...\n"
 
     return (
-        f"{link}{header}"
+        f"{link_str}{header}"
         f"🎧 <b>{esc(title)}</b>\n"
         f"🎤 <i>{esc(artist)}</i>\n"
         f"<i>🔁 {plays} Plays</i>"
@@ -1089,7 +1096,7 @@ def story_render_image(
             logo_img = logo_img.resize((logo_size, logo_size), RESAMPLE_LANCZOS)
             bg.alpha_composite(logo_img, (text_x, current_y))
             logo_drawn = True
-        except Exception as e:  # <-- FIX: Added "as" here
+        except Exception as e:
             logger.warning("Erro ao carregar logo.png: %s", e)
 
     if logo_drawn:
@@ -1268,40 +1275,70 @@ async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (target_msg.via_bot and target_msg.via_bot.id == context.bot.id)
         )
 
-        if is_own_bot and "🎧" in query_text and "🎤" in query_text:
-            title, artist = "", ""
-            for line in query_text.split('\n'):
-                if "🎧" in line:
-                    title = line.replace("🎧", "").strip()
-                elif "🎤" in line:
-                    artist = line.replace("🎤", "").strip()
+        if is_own_bot:
+            exact_track_id = None
+            entities = target_msg.caption_entities if target_msg.caption else target_msg.entities
             
-            if title or artist:
-                exact_query = f"{title} {artist}".strip()
-                normalized_query = normalize_query(exact_query, 200)
-                
-                tracks = await deezer_search(normalized_query)
-                if tracks:
-                    ranked = rank_tracks(normalized_query, tracks)
-                    if ranked:
-                        _, best_track = ranked[0]
-                        track_id = str(best_track["id"])
-                        t_title = _truncate(best_track.get("title") or "Unknown", 30)
-                        t_artist = _truncate((best_track.get("artist") or {}).get("name") or "Unknown", 30)
+            if entities:
+                for ent in entities:
+                    if ent.type == "text_link" and ent.url and "deezer.com/track/" in ent.url:
+                        exact_track_id = ent.url.split("deezer.com/track/")[-1].split("?")[0].strip("/")
+                        break
+            
+            if exact_track_id:
+                track = await resolve_track(exact_track_id)
+                if track and track.get("id"):
+                    t_title = _truncate(track.get("title") or "Unknown", 30)
+                    t_artist = _truncate((track.get("artist") or {}).get("name") or "Unknown", 30)
 
-                        keyboard = [
-                            [
-                                InlineKeyboardButton("Modo Claro ⚪️", callback_data=f"story_theme:light:{track_id}"),
-                                InlineKeyboardButton("Modo Escuro ⚫️", callback_data=f"story_theme:dark:{track_id}")
-                            ]
+                    keyboard = [
+                        [
+                            InlineKeyboardButton("Modo Claro ⚪️", callback_data=f"story_theme:light:{exact_track_id}"),
+                            InlineKeyboardButton("Modo Escuro ⚫️", callback_data=f"story_theme:dark:{exact_track_id}")
                         ]
+                    ]
 
-                        await msg.reply_text(
-                            f"🎶 Música detectada: <b>{esc(t_title)} — {esc(t_artist)}</b>\n\n🎨 Escolha o tema do card para gerar a imagem:",
-                            parse_mode=ParseMode.HTML,
-                            reply_markup=InlineKeyboardMarkup(keyboard)
-                        )
-                        return
+                    await msg.reply_text(
+                        f"🎶 Música detectada: <b>{esc(t_title)} — {esc(t_artist)}</b>\n\n🎨 Escolha o tema do card para gerar a imagem:",
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=InlineKeyboardMarkup(keyboard)
+                    )
+                    return
+
+            if "🎧" in query_text and "🎤" in query_text:
+                title, artist = "", ""
+                for line in query_text.split('\n'):
+                    if "🎧" in line:
+                        title = line.replace("🎧", "").strip()
+                    elif "🎤" in line:
+                        artist = line.replace("🎤", "").strip()
+                
+                if title or artist:
+                    exact_query = f"{title} {artist}".strip()
+                    normalized_query = normalize_query(exact_query, 200)
+                    
+                    tracks = await deezer_search(normalized_query)
+                    if tracks:
+                        ranked = rank_tracks(normalized_query, tracks)
+                        if ranked:
+                            _, best_track = ranked[0]
+                            track_id = str(best_track["id"])
+                            t_title = _truncate(best_track.get("title") or "Unknown", 30)
+                            t_artist = _truncate((best_track.get("artist") or {}).get("name") or "Unknown", 30)
+
+                            keyboard = [
+                                [
+                                    InlineKeyboardButton("Modo Claro ⚪️", callback_data=f"story_theme:light:{track_id}"),
+                                    InlineKeyboardButton("Modo Escuro ⚫️", callback_data=f"story_theme:dark:{track_id}")
+                                ]
+                            ]
+
+                            await msg.reply_text(
+                                f"🎶 Música detectada: <b>{esc(t_title)} — {esc(t_artist)}</b>\n\n🎨 Escolha o tema do card para gerar a imagem:",
+                                parse_mode=ParseMode.HTML,
+                                reply_markup=InlineKeyboardMarkup(keyboard)
+                            )
+                            return
         
         if query_text:
             normalized_query = normalize_query(query_text, 200)
@@ -1831,6 +1868,7 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         plays=count,
         user_first_name=user_display,
         cover_url=photo,
+        track_id=t.get("id"),
     )
 
     try:
@@ -1887,6 +1925,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 plays=current_count,
                 user_first_name=user_display,
                 cover_url=cover_big,
+                track_id=track_id,
             )
 
             results.append(
