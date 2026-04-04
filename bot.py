@@ -426,7 +426,7 @@ def build_caption(
     cover_url: Optional[str] = None,
     track_id: Optional[str] = None,
 ) -> str:
-    # Colocar os links no topo evita a quebra de linha visual extra na legenda inferior
+    # Agrupamos os links invisíveis sem adicionar quebra de linha (\n)
     links = []
     if cover_url:
         safe_cover_url = html.escape(str(cover_url), quote=True)
@@ -436,12 +436,13 @@ def build_caption(
         safe_track_url = f"https://www.deezer.com/track/{html.escape(str(track_id))}"
         links.append(f"<a href='{safe_track_url}'>&#8203;</a>")
         
-    link_str = "".join(links) + "\n" if links else ""
+    link_str = "".join(links)
         
     header = ""
     if user_first_name:
         header = f"🎹 {esc(user_first_name)} está ouvindo...\n"
 
+    # O link_str fica grudado no início, totalmente invisível
     return (
         f"{link_str}{header}"
         f"🎧 <b>{esc(title)}</b>\n"
@@ -1263,9 +1264,16 @@ async def story_fetch_cover(track: Dict[str, Any], query: Optional[str] = None) 
 
 async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-    if not msg or not update.effective_chat or not update.effective_user:
+    chat = update.effective_chat
+    
+    if not msg or not chat or not update.effective_user:
         return
 
+    is_group = chat.type in ["group", "supergroup"]
+    exact_track_id = None
+    query_text = ""
+
+    # Verifica se o comando respondeu alguma mensagem (para tentar roubar o ID)
     if msg.reply_to_message:
         target_msg = msg.reply_to_message
         query_text = (target_msg.text or target_msg.caption or "").strip()
@@ -1275,26 +1283,88 @@ async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (target_msg.via_bot and target_msg.via_bot.id == context.bot.id)
         )
 
+        # Se respondeu o próprio bot, varre os links invisíveis atrás do ID
         if is_own_bot:
-            exact_track_id = None
             entities = target_msg.caption_entities if target_msg.caption else target_msg.entities
-            
             if entities:
                 for ent in entities:
                     if ent.type == "text_link" and ent.url and "deezer.com/track/" in ent.url:
                         exact_track_id = ent.url.split("deezer.com/track/")[-1].split("?")[0].strip("/")
                         break
+
+    # ==========================================
+    # REDIRECIONAMENTO DE GRUPO
+    # ==========================================
+    if is_group:
+        bot_username = BOT_USERNAME.replace("@", "")
+        # Se achou ID, manda pra URL com ID. Se não, manda com "new"
+        if exact_track_id:
+            url = f"https://t.me/{bot_username}?start=story_{exact_track_id}"
+        else:
+            url = f"https://t.me/{bot_username}?start=story_new"
             
-            if exact_track_id:
-                track = await resolve_track(exact_track_id)
-                if track and track.get("id"):
-                    t_title = _truncate(track.get("title") or "Unknown", 30)
-                    t_artist = _truncate((track.get("artist") or {}).get("name") or "Unknown", 30)
+        keyboard = [[InlineKeyboardButton("Continuar no Privado 🚀", url=url)]]
+        
+        await msg.reply_text(
+            "🖼️ Para gerar uma imagem é melhor você continuar comigo no chat do bot, pois o grupo não permite salvar imagens facilmente.",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    # ==========================================
+    # FLUXO SE JÁ ESTIVER NO PRIVADO
+    # ==========================================
+    
+    # Se tinha o track_id exato do deezer
+    if exact_track_id:
+        track = await resolve_track(exact_track_id)
+        if track and track.get("id"):
+            t_title = _truncate(track.get("title") or "Unknown", 30)
+            t_artist = _truncate((track.get("artist") or {}).get("name") or "Unknown", 30)
+
+            keyboard = [
+                [
+                    InlineKeyboardButton("Modo Claro ⚪️", callback_data=f"story_theme:light:{exact_track_id}"),
+                    InlineKeyboardButton("Modo Escuro ⚫️", callback_data=f"story_theme:dark:{exact_track_id}")
+                ]
+            ]
+
+            await msg.reply_text(
+                f"🎶 Música detectada: <b>{esc(t_title)} — {esc(t_artist)}</b>\n\n🎨 Escolha o tema do card para gerar a imagem:",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return
+
+    # Fallback textual para mensagens do bot sem link escondido (muito antigas)
+    if (msg.reply_to_message and 
+        (msg.reply_to_message.from_user.id == context.bot.id or (msg.reply_to_message.via_bot and msg.reply_to_message.via_bot.id == context.bot.id)) and 
+        "🎧" in query_text and "🎤" in query_text):
+        
+        title, artist = "", ""
+        for line in query_text.split('\n'):
+            if "🎧" in line:
+                title = line.replace("🎧", "").strip()
+            elif "🎤" in line:
+                artist = line.replace("🎤", "").strip()
+        
+        if title or artist:
+            exact_query = f"{title} {artist}".strip()
+            normalized_query = normalize_query(exact_query, 200)
+            
+            tracks = await deezer_search(normalized_query)
+            if tracks:
+                ranked = rank_tracks(normalized_query, tracks)
+                if ranked:
+                    _, best_track = ranked[0]
+                    track_id = str(best_track["id"])
+                    t_title = _truncate(best_track.get("title") or "Unknown", 30)
+                    t_artist = _truncate((best_track.get("artist") or {}).get("name") or "Unknown", 30)
 
                     keyboard = [
                         [
-                            InlineKeyboardButton("Modo Claro ⚪️", callback_data=f"story_theme:light:{exact_track_id}"),
-                            InlineKeyboardButton("Modo Escuro ⚫️", callback_data=f"story_theme:dark:{exact_track_id}")
+                            InlineKeyboardButton("Modo Claro ⚪️", callback_data=f"story_theme:light:{track_id}"),
+                            InlineKeyboardButton("Modo Escuro ⚫️", callback_data=f"story_theme:dark:{track_id}")
                         ]
                     ]
 
@@ -1305,78 +1375,45 @@ async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     return
 
-            if "🎧" in query_text and "🎤" in query_text:
-                title, artist = "", ""
-                for line in query_text.split('\n'):
-                    if "🎧" in line:
-                        title = line.replace("🎧", "").strip()
-                    elif "🎤" in line:
-                        artist = line.replace("🎤", "").strip()
+    # Fallback de busca textual comum
+    if query_text:
+        normalized_query = normalize_query(query_text, 200)
+        if normalized_query:
+            tracks = await deezer_search(normalized_query)
+            
+            if tracks is None:
+                await msg.reply_text("⚠️ Erro ao acessar o serviço de busca. Tente novamente.")
+                return
                 
-                if title or artist:
-                    exact_query = f"{title} {artist}".strip()
-                    normalized_query = normalize_query(exact_query, 200)
-                    
-                    tracks = await deezer_search(normalized_query)
-                    if tracks:
-                        ranked = rank_tracks(normalized_query, tracks)
-                        if ranked:
-                            _, best_track = ranked[0]
-                            track_id = str(best_track["id"])
-                            t_title = _truncate(best_track.get("title") or "Unknown", 30)
-                            t_artist = _truncate((best_track.get("artist") or {}).get("name") or "Unknown", 30)
-
-                            keyboard = [
-                                [
-                                    InlineKeyboardButton("Modo Claro ⚪️", callback_data=f"story_theme:light:{track_id}"),
-                                    InlineKeyboardButton("Modo Escuro ⚫️", callback_data=f"story_theme:dark:{track_id}")
-                                ]
-                            ]
-
-                            await msg.reply_text(
-                                f"🎶 Música detectada: <b>{esc(t_title)} — {esc(t_artist)}</b>\n\n🎨 Escolha o tema do card para gerar a imagem:",
-                                parse_mode=ParseMode.HTML,
-                                reply_markup=InlineKeyboardMarkup(keyboard)
-                            )
-                            return
-        
-        if query_text:
-            normalized_query = normalize_query(query_text, 200)
-            if normalized_query:
-                tracks = await deezer_search(normalized_query)
-                
-                if tracks is None:
-                    await msg.reply_text("⚠️ Erro ao acessar o serviço de busca. Tente novamente.")
-                    return
-                    
-                if not tracks:
-                    await msg.reply_text("🔎 Nenhuma música encontrada com esse nome.")
-                    return
-
-                ranked = rank_tracks(normalized_query, tracks)
-                keyboard = []
-                
-                for score, t in ranked[:5]:
-                    track_id = str(t["id"])
-                    t_title = _truncate(t.get("title") or "Unknown", 30)
-                    t_artist = _truncate((t.get("artist") or {}).get("name") or "Unknown", 30)
-                    keyboard.append([
-                        InlineKeyboardButton(
-                            f"🎵 {t_title} — {t_artist}",
-                            callback_data=f"story_select:{track_id}"
-                        )
-                    ])
-
-                if not keyboard:
-                    await msg.reply_text("🔎 Nenhuma correspondência válida encontrada.")
-                    return
-
-                await msg.reply_text(
-                    "🎧 Qual destas músicas você quer no seu Story?",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
+            if not tracks:
+                await msg.reply_text("🔎 Nenhuma música encontrada com esse nome.")
                 return
 
+            ranked = rank_tracks(normalized_query, tracks)
+            keyboard = []
+            
+            for score, t in ranked[:5]:
+                track_id = str(t["id"])
+                t_title = _truncate(t.get("title") or "Unknown", 30)
+                t_artist = _truncate((t.get("artist") or {}).get("name") or "Unknown", 30)
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"🎵 {t_title} — {t_artist}",
+                        callback_data=f"story_select:{track_id}"
+                    )
+                ])
+
+            if not keyboard:
+                await msg.reply_text("🔎 Nenhuma correspondência válida encontrada.")
+                return
+
+            await msg.reply_text(
+                "🎧 Qual destas músicas você quer no seu Story?",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return
+
+    # Se não respondeu nenhuma mensagem (tanto faz grupo ou privado)
     prompt = await msg.reply_text(
         "🎵 Responda esta mensagem com o nome da música para o Story.",
         parse_mode=ParseMode.HTML,
@@ -1662,6 +1699,48 @@ async def export_stats_to_disk() -> Optional[str]:
 # =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Verifica se o comando start veio com parâmetros do Deep Link (ex: start=story_12345)
+    args = context.args
+    if args and args[0].startswith("story_"):
+        payload = args[0].replace("story_", "")
+        
+        # Se veio sem música selecionada, inicia o fluxo do zero no privado
+        if payload == "new":
+            prompt = await update.message.reply_text(
+                "🎵 Envie o nome da música que você quer para o Story.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=ForceReply(selective=True),
+            )
+            _story_register_prompt(update.effective_chat.id, update.effective_user.id, prompt.message_id)
+            return
+            
+        # Se veio com um ID, já pula para a etapa de escolher o tema!
+        else:
+            track_id = payload
+            track = await resolve_track(track_id)
+            
+            if track and track.get("id"):
+                t_title = _truncate(track.get("title") or "Unknown", 30)
+                t_artist = _truncate((track.get("artist") or {}).get("name") or "Unknown", 30)
+
+                keyboard = [
+                    [
+                        InlineKeyboardButton("Modo Claro ⚪️", callback_data=f"story_theme:light:{track_id}"),
+                        InlineKeyboardButton("Modo Escuro ⚫️", callback_data=f"story_theme:dark:{track_id}")
+                    ]
+                ]
+
+                await update.message.reply_text(
+                    f"🎶 Música escolhida: <b>{esc(t_title)} — {esc(t_artist)}</b>\n\n🎨 Escolha o tema do card para gerar a imagem:",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+                return
+            else:
+                await update.message.reply_text("❌ Música não encontrada.")
+                return
+
+    # Mensagem de Start Padrão
     text = (
         f"🎶 <b>{BOT_DISPLAY_NAME}</b>\n"
         f"🎧 Digite o nome de uma música ou use <code>{BOT_USERNAME} nome</code>\n\n"
