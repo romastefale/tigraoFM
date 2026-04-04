@@ -285,7 +285,6 @@ def score_track_match(query: str, track: Dict[str, Any]) -> float:
     if not q_norm:
         return 0.0
 
-    # correspondência exata / forte
     if q_norm == title:
         score += 12.0
     if q_norm == artist:
@@ -302,7 +301,6 @@ def score_track_match(query: str, track: Dict[str, Any]) -> float:
     if meta and q_norm in meta:
         score += 5.0
 
-    # bônus por tokens
     if q_tokens:
         title_hits = sum(1 for tok in q_tokens if tok in title)
         artist_hits = sum(1 for tok in q_tokens if tok in artist)
@@ -317,11 +315,9 @@ def score_track_match(query: str, track: Dict[str, Any]) -> float:
         if artist_hits == len(q_tokens):
             score += 1.0
 
-        # cobre casos "nome da música artista"
         if all((tok in title or tok in artist or tok in meta) for tok in q_tokens):
             score += 2.0
 
-    # pequeno bônus por track id se digitado explicitamente
     track_id = normalize_text_basic(track.get("id") or "")
     if track_id and q_norm == track_id:
         score += 10.0
@@ -433,7 +429,7 @@ def build_caption(
     link = ""
     if cover_url:
         safe_cover_url = html.escape(str(cover_url), quote=True)
-        link = f"<a href='{safe_cover_url}'>&#8203;</a>"
+        link = f"<a href='{safe_cover_url}'>&#8203;</a>\n"
         
     header = ""
     if user_first_name:
@@ -1018,7 +1014,6 @@ def story_render_image(
     cover = ImageOps.exif_transpose(cover_image).convert("RGB")
     W, H = 1080, 1920
 
-    # Configuração de Cores para Modo Claro vs Modo Escuro
     if theme == "dark":
         bg_brightness = 0.40
         card_bg = (28, 28, 28, 245)
@@ -1034,12 +1029,10 @@ def story_render_image(
         text_artist = (160, 160, 160, 255)
         text_bot = (190, 190, 190, 255)
 
-    # 1. Fundo Desfocado
     bg = ImageOps.fit(cover, (W, H), method=RESAMPLE_LANCZOS, centering=(0.5, 0.5))
     bg = bg.filter(ImageFilter.GaussianBlur(45))
     bg = ImageEnhance.Brightness(bg).enhance(bg_brightness).convert("RGBA")
 
-    # 2. Medidas do Card e da Capa
     card_w = 860
     cover_size = 760
     padding = 50
@@ -1048,22 +1041,18 @@ def story_render_image(
     card_x = (W - card_w) // 2
     card_y = (H - card_h) // 2
 
-    # 3. Sombra do Card
     _add_shadow(bg, (card_x - 15, card_y - 15, card_x + card_w + 15, card_y + card_h + 15), radius=80)
 
-    # 4. Desenhar o Card principal
     card = Image.new("RGBA", (card_w, card_h), card_bg)
     card_mask = Image.new("L", (card_w, card_h), 0)
     ImageDraw.Draw(card_mask).rounded_rectangle((0, 0, card_w, card_h), radius=48, fill=255)
     card.putalpha(card_mask)
     bg.alpha_composite(card, (card_x, card_y))
 
-    # 5. Colar a Capa do Disco dentro do Card
     fg = ImageOps.fit(cover, (cover_size, cover_size), method=RESAMPLE_LANCZOS, centering=(0.5, 0.5))
     fg = _rounded_image(fg, 24)
     bg.alpha_composite(fg, (card_x + padding, card_y + padding))
 
-    # 6. Textos
     draw = ImageDraw.Draw(bg)
 
     font_listening = _load_font(42, bold=True)
@@ -1072,16 +1061,13 @@ def story_render_image(
 
     text_x = card_x + padding
     
-    # Distribuição proporcional das 3 linhas dentro do espaço de 240px inferior
     current_y = card_y + padding + cover_size + 40
     line_spacing = 65
 
-    # Linha 1: "usuario esta ouvindo"
     listening_text = f"{_truncate(user_name, 20)} está ouvindo..."
     draw.text((text_x, current_y), listening_text, fill=text_listening, font=font_listening)
     current_y += line_spacing
 
-    # Linha 2: "nome da música - artista"
     title = _truncate(track.get("title") or "Unknown", 25)
     artist = _truncate((track.get("artist") or {}).get("name") or "Unknown", 25)
 
@@ -1092,7 +1078,6 @@ def story_render_image(
     draw.text((text_x + title_w, current_y), f" – {artist}", fill=text_artist, font=font_track)
     current_y += line_spacing
 
-    # Linha 3: Logo (Opcional) e Nome do Bot
     bot_name_clean = "tigraoFMbot"
     logo_path = BASE_DIR / "logo.png"
     logo_size = 38
@@ -1104,17 +1089,16 @@ def story_render_image(
             logo_img = logo_img.resize((logo_size, logo_size), RESAMPLE_LANCZOS)
             bg.alpha_composite(logo_img, (text_x, current_y))
             logo_drawn = True
-        except Exception as e:
+        except Exception e:
             logger.warning("Erro ao carregar logo.png: %s", e)
 
     if logo_drawn:
-        text_offset_x = text_x + logo_size + 12 # Espaço após o ícone
-        text_offset_y = current_y + (logo_size - 32) // 2 # Centralizando na vertical (32 é o tamanho da fonte do bot)
+        text_offset_x = text_x + logo_size + 12 
+        text_offset_y = current_y + (logo_size - 32) // 2 
         draw.text((text_offset_x, text_offset_y), bot_name_clean, fill=text_bot, font=font_bot)
     else:
         draw.text((text_x, current_y), bot_name_clean, fill=text_bot, font=font_bot)
 
-    # 7. Exportar Imagem
     out = BytesIO()
     bg.convert("RGB").save(out, format="JPEG", quality=92, optimize=True, progressive=True)
     return out.getvalue()
@@ -1190,7 +1174,6 @@ async def story_fetch_track(query: str) -> Optional[Dict[str, Any]]:
     if not cleaned:
         return None
 
-    # 1) Deezer como fonte principal
     tracks = await deezer_search(cleaned)
     if tracks:
         ranked = rank_tracks(cleaned, tracks)
@@ -1201,7 +1184,6 @@ async def story_fetch_track(query: str) -> Optional[Dict[str, Any]]:
                 remember_track(best)
                 return best
 
-    # 2) iTunes como fallback com ranking interno
     track = await asyncio.to_thread(_itunes_search_sync, cleaned)
     if track and track.get("id"):
         score = score_track_match(cleaned, track)
@@ -1210,7 +1192,6 @@ async def story_fetch_track(query: str) -> Optional[Dict[str, Any]]:
             remember_track(track)
             return track
 
-    # 3) MusicBrainz como fallback final
     track = await asyncio.to_thread(_musicbrainz_search_sync, cleaned)
     if track and track.get("id"):
         score = score_track_match(cleaned, track)
@@ -1278,7 +1259,6 @@ async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg or not update.effective_chat or not update.effective_user:
         return
 
-    # 1. Verifica se o comando foi enviado como resposta a uma mensagem
     if msg.reply_to_message:
         target_msg = msg.reply_to_message
         query_text = (target_msg.text or target_msg.caption or "").strip()
@@ -1288,7 +1268,6 @@ async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (target_msg.via_bot and target_msg.via_bot.id == context.bot.id)
         )
 
-        # 2. Se for uma mensagem do próprio bot com o layout de música, extrai título e artista
         if is_own_bot and "🎧" in query_text and "🎤" in query_text:
             title, artist = "", ""
             for line in query_text.split('\n'):
@@ -1297,7 +1276,6 @@ async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 elif "🎤" in line:
                     artist = line.replace("🎤", "").strip()
             
-            # Se conseguiu extrair, faz a busca com a certeza absoluta e vai direto pro tema
             if title or artist:
                 exact_query = f"{title} {artist}".strip()
                 normalized_query = normalize_query(exact_query, 200)
@@ -1325,7 +1303,6 @@ async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         )
                         return
         
-        # 3. Se não era do bot ou falhou, usa o texto todo da mensagem respondida como busca e exibe as 5 opções
         if query_text:
             normalized_query = normalize_query(query_text, 200)
             if normalized_query:
@@ -1363,7 +1340,6 @@ async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-    # 4. Comportamento padrão: se não for resposta a nenhuma mensagem, pede a música
     prompt = await msg.reply_text(
         "🎵 Responda esta mensagem com o nome da música para o Story.",
         parse_mode=ParseMode.HTML,
@@ -1418,7 +1394,6 @@ async def story_reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     ranked = rank_tracks(normalized_query, tracks)
     keyboard = []
     
-    # Monta os botões com as 5 melhores correspondências
     for score, t in ranked[:5]:
         track_id = str(t["id"])
         title = _truncate(t.get("title") or "Unknown", 30)
@@ -1457,7 +1432,6 @@ async def story_select_callback(update: Update, context: ContextTypes.DEFAULT_TY
     title = _truncate(track.get("title") or "Unknown", 30)
     artist = _truncate((track.get("artist") or {}).get("name") or "Unknown", 30)
 
-    # Botões de tema
     keyboard = [
         [
             InlineKeyboardButton("Modo Claro ⚪️", callback_data=f"story_theme:light:{track_id}"),
@@ -1845,34 +1819,30 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cb.answer("🔄 Refaça a busca.", show_alert=True)
         return
 
-    count = register_play(cb.from_user.id, t)
+    user = cb.from_user
+    user_display = f"@{user.username}" if user.username else user.first_name
+
+    count = register_play(user.id, t)
+    photo = (t.get("album") or {}).get("cover_big")
 
     caption = build_caption(
         title=t.get("title"),
         artist=(t.get("artist") or {}).get("name"),
         plays=count,
-        user_first_name=cb.from_user.first_name,
+        user_first_name=user_display,
+        cover_url=photo,
     )
 
-    photo = (t.get("album") or {}).get("cover_big")
-
     try:
-        if photo:
-            await cb.message.reply_photo(
-                photo=photo,
-                caption=caption,
-                parse_mode=ParseMode.HTML
-            )
-        else:
-            await cb.message.reply_text(
-                caption,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True
-            )
+        await cb.message.reply_text(
+            text=caption,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=not bool(photo)
+        )
     except Exception as e:
         logger.warning("Falha ao enviar música: %s", e)
         await cb.message.reply_text(
-            caption,
+            text=caption,
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True
         )
@@ -1909,11 +1879,13 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             remember_track(t)
             current_count = get_play_count(user.id, track_id)
 
+            user_display = f"@{user.username}" if user.username else user.first_name
+
             caption = build_caption(
                 title=title,
                 artist=artist,
                 plays=current_count,
-                user_first_name=user.first_name,
+                user_first_name=user_display,
                 cover_url=cover_big,
             )
 
@@ -1981,8 +1953,10 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Redis indisponível.")
         return
 
-    user_id = update.effective_user.id
-    user_first_name = update.effective_user.first_name
+    user = update.effective_user
+    user_id = user.id
+    user_display = f"@{user.username}" if user.username else user.first_name
+
     entries: List[Tuple[str, float]] = redis_client.zrevrange(
         f"top:user:{user_id}",
         0,
@@ -1997,7 +1971,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     metas = await asyncio.gather(*(fetch_track_meta(_redis_text(track_id)) for track_id, _ in entries))
 
     lines = [
-        f"📊 <b>Músicas mais ouvidas de {esc(user_first_name or 'Usuário')} no {BOT_DISPLAY_NAME}</b>",
+        f"📊 <b>Músicas mais ouvidas de {esc(user_display or 'Usuário')} no {BOT_DISPLAY_NAME}</b>",
         ""
     ]
 
