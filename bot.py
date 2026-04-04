@@ -1089,7 +1089,7 @@ def story_render_image(
             logo_img = logo_img.resize((logo_size, logo_size), RESAMPLE_LANCZOS)
             bg.alpha_composite(logo_img, (text_x, current_y))
             logo_drawn = True
-        except Exception e:
+        except Exception as e:  # <-- FIX: Added "as" here
             logger.warning("Erro ao carregar logo.png: %s", e)
 
     if logo_drawn:
