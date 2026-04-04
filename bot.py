@@ -324,6 +324,15 @@ def score_track_match(query: str, track: Dict[str, Any]) -> float:
     elif track_id and q_norm and q_norm in track_id:
         score += 1.0
 
+    # ==========================================
+    # NOVO: BÔNUS DE POPULARIDADE (FAMA)
+    # ==========================================
+    # O rank do Deezer geralmente vai de 0 a ~1.000.000. 
+    # Adicionamos até 6.0 pontos na nota final se a música for um Hit global.
+    track_rank = int(track.get("rank") or 0)
+    rank_bonus = (track_rank / 1000000.0) * 6.0
+    score += rank_bonus
+
     return score
 
 
@@ -336,11 +345,12 @@ def rank_tracks(query: str, tracks: List[Dict[str, Any]]) -> List[Tuple[float, D
         except Exception as e:
             logger.warning("Falha ao pontuar track: %s", e)
 
+    # Ordena combinando a precisão do texto com a popularidade
     ranked.sort(
         key=lambda item: (
-            item[0],
-            normalize_text_basic(item[1].get("title") or ""),
-            normalize_text_basic((item[1].get("artist") or {}).get("name") or ""),
+            item[0],                                          # 1º: Pontuação total (Texto exato + Bônus de Fama)
+            int(item[1].get("rank") or 0),                    # 2º: Desempate pela fama pura no Deezer
+            normalize_text_basic(item[1].get("title") or ""), # 3º: Desempate por ordem alfabética
         ),
         reverse=True,
     )
@@ -583,7 +593,7 @@ async def deezer_search(query: str):
         r = await asyncio.to_thread(
             session.get,
             "https://api.deezer.com/search",
-            params={"q": query, "limit": 10},
+            params={"q": query, "limit": 25},
             timeout=6,
         )
         r.raise_for_status()
@@ -1748,7 +1758,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"/charts — suas músicas mais ouvidas\n"
         f"/top — ranking global\n"
         f"/play – enviar uma música pelo grupo\n"
-        f"/story — gerar um story da música"
+        f"/story — gerar story 9:16 da música"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -2089,7 +2099,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     metas = await asyncio.gather(*(fetch_track_meta(_redis_text(track_id)) for track_id, _ in entries))
 
     lines = [
-        f"📊 <b>Top 10 ouvidas de {esc(user_display or 'Usuário')} no {BOT_DISPLAY_NAME}</b>",
+        f"📊 <b>Músicas mais ouvidas de {esc(user_display or 'Usuário')} no {BOT_DISPLAY_NAME}</b>",
         ""
     ]
 
