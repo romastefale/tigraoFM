@@ -1319,6 +1319,60 @@ async def story_navigation_callback(update: Update, context: ContextTypes.DEFAUL
     )
 
 
+# ==========================================
+# NOVA FUNÇÃO DE EXTRAÇÃO MODULAR
+# ==========================================
+def try_extract_music_context(reply_to_message: Message, bot_id: int) -> dict:
+    """
+    Tenta extrair o ID ou nome da música silenciosamente a partir de uma mensagem respondida.
+    Retorna um dicionário com track_id, query e is_bot_text.
+    """
+    result = {"track_id": None, "query": None, "is_bot_text": False}
+    
+    if not reply_to_message:
+        return result
+
+    try:
+        text_content = (reply_to_message.text or reply_to_message.caption or "").strip()
+        is_own_bot = (
+            (reply_to_message.from_user and reply_to_message.from_user.id == bot_id) or
+            (reply_to_message.via_bot and reply_to_message.via_bot.id == bot_id)
+        )
+
+        # 1. Tenta achar o Link Invisível (ID Exato) - Apenas se for do bot
+        if is_own_bot:
+            entities = reply_to_message.caption_entities if reply_to_message.caption else reply_to_message.entities
+            if entities:
+                for ent in entities:
+                    if ent.type == "text_link" and ent.url and "deezer.com/track/" in ent.url:
+                        result["track_id"] = ent.url.split("deezer.com/track/")[-1].split("?")[0].strip("/")
+                        return result
+
+        # 2. Tenta ler o texto entre os emojis (Fallback do Bot)
+        if is_own_bot and "🎧" in text_content and "🎤" in text_content:
+            title, artist = "", ""
+            for line in text_content.split('\n'):
+                if "🎧" in line:
+                    title = line.replace("🎧", "").strip()
+                elif "🎤" in line:
+                    artist = line.replace("🎤", "").strip()
+            
+            if title or artist:
+                result["query"] = f"{title} {artist}".strip()
+                result["is_bot_text"] = True
+                return result
+
+        # 3. Se for resposta a um usuário comum, apenas pega o texto dele
+        if not is_own_bot and text_content:
+            result["query"] = text_content
+
+    except Exception:
+        # Em caso de qualquer erro estrutural da mensagem, ignora para não travar o bot
+        pass
+
+    return result
+
+
 async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     chat = update.effective_chat
@@ -1329,23 +1383,14 @@ async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_group = chat.type in ["group", "supergroup"]
     exact_track_id = None
     query_text = ""
+    is_bot_text = False
 
+    # Aplicação da nova função modular de extração
     if msg.reply_to_message:
-        target_msg = msg.reply_to_message
-        query_text = (target_msg.text or target_msg.caption or "").strip()
-
-        is_own_bot = (
-            (target_msg.from_user and target_msg.from_user.id == context.bot.id) or
-            (target_msg.via_bot and target_msg.via_bot.id == context.bot.id)
-        )
-
-        if is_own_bot:
-            entities = target_msg.caption_entities if target_msg.caption else target_msg.entities
-            if entities:
-                for ent in entities:
-                    if ent.type == "text_link" and ent.url and "deezer.com/track/" in ent.url:
-                        exact_track_id = ent.url.split("deezer.com/track/")[-1].split("?")[0].strip("/")
-                        break
+        extracted = try_extract_music_context(msg.reply_to_message, context.bot.id)
+        exact_track_id = extracted["track_id"]
+        query_text = extracted["query"] or ""
+        is_bot_text = extracted["is_bot_text"]
 
     # ==========================================
     # REDIRECIONAMENTO DE GRUPO
@@ -1389,45 +1434,35 @@ async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    if (msg.reply_to_message and 
-        (msg.reply_to_message.from_user.id == context.bot.id or (msg.reply_to_message.via_bot and msg.reply_to_message.via_bot.id == context.bot.id)) and 
-        "🎧" in query_text and "🎤" in query_text):
+    # Fallback textual para mensagens do bot sem link escondido (muito antigas)
+    if is_bot_text and query_text:
+        normalized_query = normalize_query(query_text, 200)
         
-        title, artist = "", ""
-        for line in query_text.split('\n'):
-            if "🎧" in line:
-                title = line.replace("🎧", "").strip()
-            elif "🎤" in line:
-                artist = line.replace("🎤", "").strip()
-        
-        if title or artist:
-            exact_query = f"{title} {artist}".strip()
-            normalized_query = normalize_query(exact_query, 200)
-            
-            tracks = await deezer_search(normalized_query)
-            if tracks:
-                ranked = rank_tracks(normalized_query, tracks)
-                if ranked:
-                    _, best_track = ranked[0]
-                    track_id = str(best_track["id"])
-                    t_title = _truncate(best_track.get("title") or "Unknown", 30)
-                    t_artist = _truncate((best_track.get("artist") or {}).get("name") or "Unknown", 30)
+        tracks = await deezer_search(normalized_query)
+        if tracks:
+            ranked = rank_tracks(normalized_query, tracks)
+            if ranked:
+                _, best_track = ranked[0]
+                track_id = str(best_track["id"])
+                t_title = _truncate(best_track.get("title") or "Unknown", 30)
+                t_artist = _truncate((best_track.get("artist") or {}).get("name") or "Unknown", 30)
 
-                    keyboard = [
-                        [
-                            InlineKeyboardButton("Modo Claro ⚪️", callback_data=f"story_theme:light:{track_id}"),
-                            InlineKeyboardButton("Modo Escuro ⚫️", callback_data=f"story_theme:dark:{track_id}")
-                        ]
+                keyboard = [
+                    [
+                        InlineKeyboardButton("Modo Claro ⚪️", callback_data=f"story_theme:light:{track_id}"),
+                        InlineKeyboardButton("Modo Escuro ⚫️", callback_data=f"story_theme:dark:{track_id}")
                     ]
+                ]
 
-                    await msg.reply_text(
-                        f"🎶 Música detectada: <b>{esc(t_title)} — {esc(t_artist)}</b>\n\n🎨 Escolha o tema do card para gerar a imagem:",
-                        parse_mode=ParseMode.HTML,
-                        reply_markup=InlineKeyboardMarkup(keyboard)
-                    )
-                    return
+                await msg.reply_text(
+                    f"🎶 Música detectada: <b>{esc(t_title)} — {esc(t_artist)}</b>\n\n🎨 Escolha o tema do card para gerar a imagem:",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+                return
 
-    if query_text:
+    # Fallback de busca textual comum
+    if query_text and not is_bot_text:
         normalized_query = normalize_query(query_text, 200)
         if normalized_query:
             tracks = await deezer_search(normalized_query)
