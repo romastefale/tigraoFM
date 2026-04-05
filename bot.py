@@ -326,12 +326,12 @@ def score_track_match(query: str, track: Dict[str, Any]) -> float:
         score += 1.0
 
     # ==========================================
-    # NOVO: BÔNUS DE POPULARIDADE (FAMA)
+    # NOVO: BÔNUS DE POPULARIDADE (MAIS EVIDÊNCIA)
     # ==========================================
     # O rank do Deezer geralmente vai de 0 a ~1.000.000. 
-    # Adicionamos até 6.0 pontos na nota final se a música for um Hit global.
+    # Multiplicador aumentado para 10.0 para garantir que hits fiquem no topo.
     track_rank = int(track.get("rank") or 0)
-    rank_bonus = (track_rank / 1000000.0) * 6.0
+    rank_bonus = (track_rank / 1000000.0) * 10.0
     score += rank_bonus
 
     return score
@@ -441,12 +441,7 @@ def build_caption(
     if user_first_name:
         header = f"🎹 {esc(user_first_name)} está ouvindo...\n\n"
 
-    # Transformamos o título em um link clicável para a música no Deezer!
-    if track_id:
-        track_url = f"https://www.deezer.com/track/{html.escape(str(track_id))}"
-        title_line = f"🎧 <a href='{track_url}'><b>{esc(title)}</b></a>"
-    else:
-        title_line = f"🎧 <b>{esc(title)}</b>"
+    title_line = f"🎧 <b>{esc(title)}</b>"
 
     return (
         f"{header}"
@@ -1747,7 +1742,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 # =========================
-# BUSCA NORMAL
+# BUSCA NORMAL E PAGINAÇÃO
 # =========================
 
 def _format_track_button_text(track: Dict[str, Any]) -> str:
@@ -1756,11 +1751,16 @@ def _format_track_button_text(track: Dict[str, Any]) -> str:
     return f"🎵 {title} — {artist}"
 
 
-def _build_track_keyboard(tracks: List[Dict[str, Any]], query: str, limit: int = 5) -> List[List[InlineKeyboardButton]]:
+def _build_track_keyboard_dynamic(tracks: List[Dict[str, Any]], query: str, offset: int = 0, limit: int = 5) -> List[List[InlineKeyboardButton]]:
     ranked = rank_tracks(query, tracks)
+    total_tracks = len(ranked)
+    
+    # Pega apenas o segmento da página atual
+    page_items = ranked[offset : offset + limit]
     keyboard: List[List[InlineKeyboardButton]] = []
 
-    for score, t in ranked[:limit]:
+    # Botões das músicas
+    for score, t in page_items:
         try:
             track_id = str(t["id"])
             remember_track(t)
@@ -1773,7 +1773,48 @@ def _build_track_keyboard(tracks: List[Dict[str, Any]], query: str, limit: int =
         except Exception as e:
             logger.warning("Erro montando botão: %s", e)
 
+    # Linha de Navegação (Voltar | Próximo)
+    nav_buttons = []
+    
+    # Botão Voltar (só aparece se não estiver na primeira página)
+    if offset >= limit:
+        nav_buttons.append(InlineKeyboardButton("⬅️ Anterior", callback_data=f"nav:{offset - limit}:{query}"))
+    
+    # Botão Próximo (só aparece se ainda tiver mais músicas na lista)
+    if offset + limit < total_tracks:
+        nav_buttons.append(InlineKeyboardButton("Próximo ➡️", callback_data=f"nav:{offset + limit}:{query}"))
+
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+
     return keyboard
+
+
+async def navigation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cb = update.callback_query
+    await cb.answer()
+
+    # Extrai o offset (página) e a pesquisa do botão clicado
+    try:
+        _, offset_str, query = cb.data.split(":", 2)
+        offset = int(offset_str)
+    except ValueError:
+        return
+
+    tracks = await deezer_search(query)
+    if not tracks:
+        return
+
+    keyboard = _build_track_keyboard_dynamic(tracks, query, offset=offset)
+    
+    page_num = (offset // 5) + 1
+    
+    # Edita a mensagem para mostrar a nova lista sem poluir o chat
+    await cb.edit_message_text(
+        f"🎧 Resultados para: <b>{esc(query)}</b>\n<i>Página {page_num}</i>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 
 async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1792,7 +1833,7 @@ async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔎 Nada encontrado.")
         return
 
-    keyboard = _build_track_keyboard(tracks, query, limit=5)
+    keyboard = _build_track_keyboard_dynamic(tracks, query, offset=0, limit=5)
 
     if not keyboard:
         await update.message.reply_text("🔎 Nada encontrado.")
@@ -1893,7 +1934,7 @@ async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔎 Nada encontrado.")
         return
 
-    keyboard = _build_track_keyboard(tracks, query, limit=5)
+    keyboard = _build_track_keyboard_dynamic(tracks, query, offset=0, limit=5)
 
     if not keyboard:
         await update.message.reply_text("🔎 Nada encontrado.")
@@ -1934,7 +1975,6 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     count = register_play(user.id, t)
     photo = (t.get("album") or {}).get("cover_big") or ""
-    track_url = f"https://www.deezer.com/track/{t.get('id')}"
 
     caption = build_caption(
         title=t.get("title"),
@@ -1945,7 +1985,7 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         track_id=t.get("id"),
     )
 
-    preview_url = photo if photo else track_url
+    preview_url = photo
 
     try:
         await cb.message.reply_text(
@@ -2277,6 +2317,7 @@ def main():
     app.add_handler(CallbackQueryHandler(story_theme_callback, pattern=r"^story_theme:"))
     app.add_handler(CallbackQueryHandler(story_select_callback, pattern=r"^story_select:"))
     app.add_handler(CallbackQueryHandler(click, pattern=r"^play:"))
+    app.add_handler(CallbackQueryHandler(navigation_callback, pattern=r"^nav:"))
 
     app.add_handler(InlineQueryHandler(inline_query))
     app.add_handler(ChosenInlineResultHandler(chosen_inline))
