@@ -325,6 +325,11 @@ def score_track_match(query: str, track: Dict[str, Any]) -> float:
     elif track_id and q_norm and q_norm in track_id:
         score += 1.0
 
+    # ==========================================
+    # NOVO: BÔNUS DE POPULARIDADE (FAMA)
+    # ==========================================
+    # O rank do Deezer geralmente vai de 0 a ~1.000.000. 
+    # Adicionamos até 6.0 pontos na nota final se a música for um Hit global.
     track_rank = int(track.get("rank") or 0)
     rank_bonus = (track_rank / 1000000.0) * 6.0
     score += rank_bonus
@@ -341,11 +346,12 @@ def rank_tracks(query: str, tracks: List[Dict[str, Any]]) -> List[Tuple[float, D
         except Exception as e:
             logger.warning("Falha ao pontuar track: %s", e)
 
+    # Ordena combinando a precisão do texto com a popularidade
     ranked.sort(
         key=lambda item: (
-            item[0],                                          
-            int(item[1].get("rank") or 0),                    
-            normalize_text_basic(item[1].get("title") or ""), 
+            item[0],                                          # 1º: Pontuação total (Texto exato + Bônus de Fama)
+            int(item[1].get("rank") or 0),                    # 2º: Desempate pela fama pura no Deezer
+            normalize_text_basic(item[1].get("title") or ""), # 3º: Desempate por ordem alfabética
         ),
         reverse=True,
     )
@@ -428,15 +434,23 @@ def build_caption(
     artist: Any,
     plays: int,
     user_first_name: Optional[str] = None,
+    cover_url: Optional[str] = None,
+    track_id: Optional[str] = None,
 ) -> str:
     header = ""
     if user_first_name:
         header = f"🎹 {esc(user_first_name)} está ouvindo...\n\n"
 
-    # Totalmente limpo, sem link invisível e sem link no título
+    # Transformamos o título em um link clicável para a música no Deezer!
+    if track_id:
+        track_url = f"https://www.deezer.com/track/{html.escape(str(track_id))}"
+        title_line = f"🎧 <a href='{track_url}'><b>{esc(title)}</b></a>"
+    else:
+        title_line = f"🎧 <b>{esc(title)}</b>"
+
     return (
         f"{header}"
-        f"🎧 <b>{esc(title)}</b>\n"
+        f"{title_line}\n"
         f"🎤 <i>{esc(artist)}</i>\n"
         f"<i>🔁 {plays} Plays</i>"
     )
@@ -1920,20 +1934,25 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     count = register_play(user.id, t)
     photo = (t.get("album") or {}).get("cover_big") or ""
+    track_url = f"https://www.deezer.com/track/{t.get('id')}"
 
     caption = build_caption(
         title=t.get("title"),
         artist=(t.get("artist") or {}).get("name"),
         plays=count,
         user_first_name=user_display,
+        cover_url=photo,
+        track_id=t.get("id"),
     )
+
+    preview_url = photo if photo else track_url
 
     try:
         await cb.message.reply_text(
             text=caption,
             parse_mode=ParseMode.HTML,
             link_preview_options=LinkPreviewOptions(
-                url=photo, # Somente a URL da imagem! Isso força o Telegram a carregar a foto pura.
+                url=preview_url,
                 show_above_text=True, 
                 prefer_large_media=True
             ) if photo else LinkPreviewOptions(is_disabled=True)
@@ -1985,6 +2004,8 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 artist=artist,
                 plays=current_count,
                 user_first_name=user_display,
+                cover_url=cover_big,
+                track_id=track_id,
             )
 
             results.append(
@@ -1997,7 +2018,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         message_text=caption,
                         parse_mode=ParseMode.HTML,
                         link_preview_options=LinkPreviewOptions(
-                            url=cover_big, # Aponta o preview direto para a imagem pura!
+                            url=cover_big,
                             show_above_text=True,
                             prefer_large_media=True
                         ) if cover_big else LinkPreviewOptions(is_disabled=True)
