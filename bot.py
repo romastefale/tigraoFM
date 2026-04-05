@@ -443,11 +443,17 @@ def build_caption(
 
     title_line = f"🎧 <b>{esc(title)}</b>"
 
+    # [MICRO-CIRURGIA] Adição de link invisível para blindar o replay do Story
+    hidden_link = ""
+    if track_id:
+        hidden_link = f'<a href="https://www.deezer.com/track/{track_id}">\u200b</a>'
+
     return (
         f"{header}"
         f"{title_line}\n"
         f"🎤 <i>{esc(artist)}</i>\n"
         f"<i>🔁 {plays} Plays</i>"
+        f"{hidden_link}"
     )
 
 
@@ -1373,6 +1379,47 @@ def try_extract_music_context(reply_to_message: Message, bot_id: int) -> dict:
     return result
 
 
+# [MICRO-CIRURGIA] Helper unificado para gerar a prévia visual padrão de confirmação
+async def _send_unified_story_preview(update_obj: Any, track: Dict[str, Any], context: ContextTypes.DEFAULT_TYPE, is_edit: bool = False):
+    user = update_obj.effective_user
+    chat_id = update_obj.effective_chat.id
+    track_id = str(track.get("id"))
+    
+    user_display = f"@{user.username}" if user.username else user.first_name
+    count = get_play_count(user.id, track_id)
+    photo = (track.get("album") or {}).get("cover_big") or ""
+
+    base_caption = build_caption(
+        title=track.get("title"),
+        artist=(track.get("artist") or {}).get("name"),
+        plays=count,
+        user_first_name=user_display,
+        cover_url=photo,
+        track_id=track_id,
+    )
+
+    caption = f"{base_caption}\n\n⚠️ <b>É essa música que você quer no Story?</b>"
+
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Sim, é esta", callback_data=f"story_confirm:{track_id}"),
+            InlineKeyboardButton("🔎 Não, buscar outra", callback_data="story_search_new")
+        ]
+    ]
+
+    lpo = LinkPreviewOptions(url=photo, show_above_text=True, prefer_large_media=True) if photo else LinkPreviewOptions(is_disabled=True)
+
+    if is_edit and hasattr(update_obj, "callback_query"):
+        await update_obj.callback_query.edit_message_text(text=caption, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard), link_preview_options=lpo)
+    else:
+        # Tenta enviar como resposta se for mensagem, ou mensagem comum se for outro objeto
+        target = update_obj.message if hasattr(update_obj, "message") and update_obj.message else context.bot
+        if target == context.bot:
+            await context.bot.send_message(chat_id=chat_id, text=caption, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard), link_preview_options=lpo)
+        else:
+            await target.reply_text(text=caption, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard), link_preview_options=lpo)
+
+
 async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     chat = update.effective_chat
@@ -1385,7 +1432,6 @@ async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query_text = ""
     is_bot_text = False
 
-    # Aplicação da nova função modular de extração
     if msg.reply_to_message:
         extracted = try_extract_music_context(msg.reply_to_message, context.bot.id)
         exact_track_id = extracted["track_id"]
@@ -1397,138 +1443,36 @@ async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ==========================================
     if is_group:
         bot_username = BOT_USERNAME.replace("@", "")
-        if exact_track_id:
-            url = f"https://t.me/{bot_username}?start=story_{exact_track_id}"
-        else:
-            url = f"https://t.me/{bot_username}?start=story_new"
-            
+        url = f"https://t.me/{bot_username}?start=story_{exact_track_id}" if exact_track_id else f"https://t.me/{bot_username}?start=story_new"
         keyboard = [[InlineKeyboardButton("Continuar no Privado 🚀", url=url)]]
-        
-        await msg.reply_text(
-            "🖼️ Para gerar uma imagem é melhor você continuar comigo no chat do bot, pois o grupo não permite salvar imagens facilmente.",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await msg.reply_text("🖼️ Para gerar uma imagem é melhor você continuar comigo no chat do bot, pois o grupo não permite salvar imagens facilmente.", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
     # ==========================================
     # FLUXO SE JÁ ESTIVER NO PRIVADO
     # ==========================================
-    
     if exact_track_id:
         track = await resolve_track(exact_track_id)
         if track and track.get("id"):
-            user = update.effective_user
-            user_display = f"@{user.username}" if user.username else user.first_name
-            count = get_play_count(user.id, exact_track_id)
-            photo = (track.get("album") or {}).get("cover_big") or ""
-
-            base_caption = build_caption(
-                title=track.get("title"),
-                artist=(track.get("artist") or {}).get("name"),
-                plays=count,
-                user_first_name=user_display,
-                cover_url=photo,
-                track_id=track.get("id"),
-            )
-
-            caption = f"{base_caption}\n\n⚠️ <b>É essa música que você quer no Story?</b>"
-
-            keyboard = [
-                [
-                    InlineKeyboardButton("✅ Sim, é esta", callback_data=f"story_confirm:{exact_track_id}"),
-                    InlineKeyboardButton("🔎 Não, buscar outra", callback_data="story_search_new")
-                ]
-            ]
-
-            await msg.reply_text(
-                text=caption,
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                link_preview_options=LinkPreviewOptions(
-                    url=photo,
-                    show_above_text=True, 
-                    prefer_large_media=True
-                ) if photo else LinkPreviewOptions(is_disabled=True)
-            )
+            await _send_unified_story_preview(update, track, context)
             return
 
-    # Fallback textual para mensagens do bot sem link escondido (muito antigas)
-    if is_bot_text and query_text:
+    # Fallback textual (mensagens antigas ou texto direto)
+    if query_text:
         normalized_query = normalize_query(query_text, 200)
-        
         tracks = await deezer_search(normalized_query)
         if tracks:
             ranked = rank_tracks(normalized_query, tracks)
             if ranked:
                 _, best_track = ranked[0]
-                track_id = str(best_track["id"])
-                
-                user = update.effective_user
-                user_display = f"@{user.username}" if user.username else user.first_name
-                count = get_play_count(user.id, track_id)
-                photo = (best_track.get("album") or {}).get("cover_big") or ""
-
-                base_caption = build_caption(
-                    title=best_track.get("title"),
-                    artist=(best_track.get("artist") or {}).get("name"),
-                    plays=count,
-                    user_first_name=user_display,
-                    cover_url=photo,
-                    track_id=track_id,
-                )
-
-                caption = f"{base_caption}\n\n⚠️ <b>É essa música que você quer no Story?</b>"
-
-                keyboard = [
-                    [
-                        InlineKeyboardButton("✅ Sim, é esta", callback_data=f"story_confirm:{track_id}"),
-                        InlineKeyboardButton("🔎 Não, buscar outra", callback_data="story_search_new")
-                    ]
-                ]
-
-                await msg.reply_text(
-                    text=caption,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                    link_preview_options=LinkPreviewOptions(
-                        url=photo,
-                        show_above_text=True, 
-                        prefer_large_media=True
-                    ) if photo else LinkPreviewOptions(is_disabled=True)
-                )
+                if is_bot_text:
+                    await _send_unified_story_preview(update, best_track, context)
+                else:
+                    keyboard = _build_story_keyboard_dynamic(tracks, normalized_query, offset=0)
+                    await msg.reply_text("🎧 Qual destas músicas você quer no seu Story?", reply_markup=InlineKeyboardMarkup(keyboard))
                 return
 
-    # Fallback de busca textual comum
-    if query_text and not is_bot_text:
-        normalized_query = normalize_query(query_text, 200)
-        if normalized_query:
-            tracks = await deezer_search(normalized_query)
-            
-            if tracks is None:
-                await msg.reply_text("⚠️ Erro ao acessar o serviço de busca. Tente novamente.")
-                return
-                
-            if not tracks:
-                await msg.reply_text("🔎 Nenhuma música encontrada com esse nome.")
-                return
-
-            keyboard = _build_story_keyboard_dynamic(tracks, normalized_query, offset=0)
-
-            if not keyboard:
-                await msg.reply_text("🔎 Nenhuma correspondência válida encontrada.")
-                return
-
-            await msg.reply_text(
-                "🎧 Qual destas músicas você quer no seu Story?",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-            return
-
-    prompt = await msg.reply_text(
-        "🎵 Responda esta mensagem com o nome da música para o Story.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=ForceReply(selective=True),
-    )
+    prompt = await msg.reply_text("🎵 Responda esta mensagem com o nome da música para o Story.", parse_mode=ParseMode.HTML, reply_markup=ForceReply(selective=True))
     _story_register_prompt(update.effective_chat.id, update.effective_user.id, prompt.message_id)
 
 
@@ -1547,10 +1491,7 @@ async def story_reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     prompt_id = msg.reply_to_message.message_id
 
     pending = STORY_PENDING_BY_PROMPT.get((chat_id, prompt_id))
-    if not pending:
-        return
-
-    if int(pending.get("user_id", 0)) != user_id:
+    if not pending or int(pending.get("user_id", 0)) != user_id:
         return
 
     if time.time() - float(pending.get("ts", 0)) > STORY_TIMEOUT:
@@ -1559,32 +1500,15 @@ async def story_reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     _story_consume_prompt(chat_id, user_id, prompt_id)
-
     normalized_query = normalize_query(reply_text, 200)
-    if not normalized_query:
-        await msg.reply_text("🎵 Envie um nome de música válido.")
-        return
-
     tracks = await deezer_search(normalized_query)
     
-    if tracks is None:
-        await msg.reply_text("⚠️ Erro ao acessar o serviço de busca. Tente novamente.")
-        return
-        
     if not tracks:
         await msg.reply_text("🔎 Nenhuma música encontrada com esse nome.")
         return
 
     keyboard = _build_story_keyboard_dynamic(tracks, normalized_query, offset=0)
-
-    if not keyboard:
-        await msg.reply_text("🔎 Nenhuma correspondência válida encontrada.")
-        return
-
-    await msg.reply_text(
-        "🎧 Qual destas músicas você quer no seu Story?",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await msg.reply_text("🎧 Qual destas músicas você quer no seu Story?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def story_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1601,39 +1525,7 @@ async def story_select_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await cb.edit_message_text("❌ Música não encontrada ou indisponível.")
         return
 
-    user = update.effective_user
-    user_display = f"@{user.username}" if user.username else user.first_name
-    count = get_play_count(user.id, track_id)
-    photo = (track.get("album") or {}).get("cover_big") or ""
-
-    base_caption = build_caption(
-        title=track.get("title"),
-        artist=(track.get("artist") or {}).get("name"),
-        plays=count,
-        user_first_name=user_display,
-        cover_url=photo,
-        track_id=track.get("id"),
-    )
-
-    caption = f"{base_caption}\n\n⚠️ <b>É essa música que você quer no Story?</b>"
-
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Sim, é esta", callback_data=f"story_confirm:{track_id}"),
-            InlineKeyboardButton("🔎 Não, buscar outra", callback_data="story_search_new")
-        ]
-    ]
-
-    await cb.edit_message_text(
-        text=caption,
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        link_preview_options=LinkPreviewOptions(
-            url=photo,
-            show_above_text=True, 
-            prefer_large_media=True
-        ) if photo else LinkPreviewOptions(is_disabled=True)
-    )
+    await _send_unified_story_preview(update, track, context, is_edit=True)
 
 
 # ==========================================
@@ -1654,13 +1546,14 @@ async def story_confirm_callback(update: Update, context: ContextTypes.DEFAULT_T
             InlineKeyboardButton("Modo Escuro ⚫️", callback_data=f"story_theme:dark:{track_id}")
         ]
     ]
-    await cb.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+    # [MICRO-CIRURGIA] Atualização de texto para guiar o usuário após a confirmação
+    new_text = re.sub(r"⚠️ <b>É essa música.*Story\?</b>", "🎨 <b>Escolha o tema do card para gerar a imagem:</b>", cb.message.text_html, flags=re.DOTALL)
+    await cb.edit_message_text(text=new_text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard), link_preview_options=cb.message.link_preview_options)
 
 
 async def story_search_new_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cb = update.callback_query
     await cb.answer()
-    
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
 
@@ -1669,12 +1562,7 @@ async def story_search_new_callback(update: Update, context: ContextTypes.DEFAUL
     except Exception:
         pass
 
-    prompt = await context.bot.send_message(
-        chat_id=chat_id,
-        text="🎵 Responda esta mensagem com o nome da música para o Story.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=ForceReply(selective=True),
-    )
+    prompt = await context.bot.send_message(chat_id=chat_id, text="🎵 Responda esta mensagem com o nome da música para o Story.", parse_mode=ParseMode.HTML, reply_markup=ForceReply(selective=True))
     _story_register_prompt(chat_id, user_id, prompt.message_id)
 
 
@@ -1688,14 +1576,12 @@ async def story_theme_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     chat_id = update.effective_chat.id
-
     try:
         await cb.edit_message_text("⏳ <i>Gerando seu story, aguarde...</i>", parse_mode=ParseMode.HTML)
     except Exception:
         pass
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
-
     safe_id = _safe_track_id(track_id)
     query_lock_key = f"story_{safe_id}_{theme}"
 
@@ -1712,31 +1598,12 @@ async def story_theme_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         try:
             track = await resolve_track(track_id)
             cover = await story_fetch_cover(track)
-
             user = update.effective_user
             raw_name = f"@{user.username}" if user.username else (user.first_name or "Usuário")
             user_name = sanitize(raw_name)
 
-            image_bytes = await asyncio.to_thread(
-                story_render_image,
-                track,
-                cover,
-                user_name,
-                theme
-            )
-
-            cached_path = await asyncio.to_thread(
-                story_cache_set,
-                track,
-                image_bytes,
-                theme=theme,
-                cover_url=((track.get("album") or {}).get("cover_xl")
-                           or (track.get("album") or {}).get("cover_big")
-                           or (track.get("album") or {}).get("cover_medium")
-                           or track.get("artwork_url")
-                           or ""),
-                user_name=user_name,
-            )
+            image_bytes = await asyncio.to_thread(story_render_image, track, cover, user_name, theme)
+            cached_path = await asyncio.to_thread(story_cache_set, track, image_bytes, theme=theme, cover_url=((track.get("album") or {}).get("cover_xl") or (track.get("album") or {}).get("cover_big") or (track.get("album") or {}).get("cover_medium") or track.get("artwork_url") or ""), user_name=user_name)
 
             await cb.message.delete()
             await context.bot.send_photo(chat_id=chat_id, photo=str(cached_path))
@@ -1747,42 +1614,24 @@ async def story_theme_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             except Exception:
                 pass
 
-
 # =========================
 # BACKUP / STATS EXPORT
 # =========================
 
 def _serialize_redis_key(key: bytes) -> Dict[str, Any]:
     assert redis_client is not None
-
     try:
         key_type = _redis_text(redis_client.type(key))
         ttl = redis_client.ttl(key)
-
-        if key_type == "string":
-            value = redis_client.get(key)
-        elif key_type == "hash":
-            value = redis_client.hgetall(key)
-        elif key_type == "zset":
-            value = redis_client.zrange(key, 0, -1, withscores=True)
-        elif key_type == "set":
-            value = sorted(list(redis_client.smembers(key)))
-        elif key_type == "list":
-            value = redis_client.lrange(key, 0, -1)
-        else:
-            value = None
-
-        return {
-            "type": key_type,
-            "ttl": ttl,
-            "value": _redis_jsonable(value),
-        }
+        if key_type == "string": value = redis_client.get(key)
+        elif key_type == "hash": value = redis_client.hgetall(key)
+        elif key_type == "zset": value = redis_client.zrange(key, 0, -1, withscores=True)
+        elif key_type == "set": value = sorted(list(redis_client.smembers(key)))
+        elif key_type == "list": value = redis_client.lrange(key, 0, -1)
+        else: value = None
+        return {"type": key_type, "ttl": ttl, "value": _redis_jsonable(value)}
     except Exception as e:
-        return {
-            "type": "error",
-            "ttl": None,
-            "value": f"{type(e).__name__}: {e}",
-        }
+        return {"type": "error", "ttl": None, "value": f"{type(e).__name__}: {e}"}
 
 
 def _write_json(path: str, payload: Dict[str, Any]) -> None:
@@ -1792,21 +1641,11 @@ def _write_json(path: str, payload: Dict[str, Any]) -> None:
 
 
 async def backup_redis_to_disk() -> Optional[str]:
-    if not redis_client:
-        return None
-
+    if not redis_client: return None
     try:
         keys = list(redis_client.scan_iter("*"))
-        dump: Dict[str, Any] = {
-            "generated_at": datetime.utcnow().isoformat() + "Z",
-            "redis_url_present": bool(REDIS_URL),
-            "keys_count": len(keys),
-            "keys": {},
-        }
-
-        for key in keys:
-            dump["keys"][_redis_text(key)] = _redis_jsonable(_serialize_redis_key(key))
-
+        dump: Dict[str, Any] = {"generated_at": datetime.utcnow().isoformat() + "Z", "redis_url_present": bool(REDIS_URL), "keys_count": len(keys), "keys": {}}
+        for key in keys: dump["keys"][_redis_text(key)] = _redis_jsonable(_serialize_redis_key(key))
         filename = f"redis_backup_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
         path = os.path.join(BACKUP_PATH, filename)
         _write_json(path, dump)
@@ -1818,31 +1657,16 @@ async def backup_redis_to_disk() -> Optional[str]:
 
 
 async def export_stats_to_disk() -> Optional[str]:
-    if not redis_client:
-        return None
-
+    if not redis_client: return None
     try:
         top_global = _redis_jsonable(redis_client.zrevrange("top:tracks", 0, 99, withscores=True))
         exported_users: Dict[str, Any] = {}
-
         for key in redis_client.scan_iter("top:user:*"):
             try:
                 user_id = _redis_text(key).split("top:user:", 1)[1]
                 exported_users[user_id] = _redis_jsonable(redis_client.zrevrange(key, 0, 99, withscores=True))
-            except Exception:
-                continue
-
-        payload: Dict[str, Any] = {
-            "generated_at": datetime.utcnow().isoformat() + "Z",
-            "bot": BOT_DISPLAY_NAME,
-            "top_global": top_global,
-            "top_users": exported_users,
-            "summary": {
-                "global_entries": len(top_global),
-                "users_exported": len(exported_users),
-            },
-        }
-
+            except Exception: continue
+        payload: Dict[str, Any] = {"generated_at": datetime.utcnow().isoformat() + "Z", "bot": BOT_DISPLAY_NAME, "top_global": top_global, "top_users": exported_users, "summary": {"global_entries": len(top_global), "users_exported": len(exported_users)}}
         filename = f"stats_export_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
         path = os.path.join(BACKUP_PATH, filename)
         _write_json(path, payload)
@@ -1860,68 +1684,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if args and args[0].startswith("story_"):
         payload = args[0].replace("story_", "")
-        
         if payload == "new":
-            prompt = await update.message.reply_text(
-                "🎵 Envie o nome da música que você quer para o Story.",
-                parse_mode=ParseMode.HTML,
-                reply_markup=ForceReply(selective=True),
-            )
+            prompt = await update.message.reply_text("🎵 Envie o nome da música que você quer para o Story.", parse_mode=ParseMode.HTML, reply_markup=ForceReply(selective=True))
             _story_register_prompt(update.effective_chat.id, update.effective_user.id, prompt.message_id)
             return
-            
         else:
-            track_id = payload
-            track = await resolve_track(track_id)
-            
+            track = await resolve_track(payload)
             if track and track.get("id"):
-                user = update.effective_user
-                user_display = f"@{user.username}" if user.username else user.first_name
-                count = get_play_count(user.id, track_id)
-                photo = (track.get("album") or {}).get("cover_big") or ""
-
-                base_caption = build_caption(
-                    title=track.get("title"),
-                    artist=(track.get("artist") or {}).get("name"),
-                    plays=count,
-                    user_first_name=user_display,
-                    cover_url=photo,
-                    track_id=track.get("id"),
-                )
-
-                caption = f"{base_caption}\n\n⚠️ <b>É essa música que você quer no Story?</b>"
-
-                keyboard = [
-                    [
-                        InlineKeyboardButton("✅ Sim, é esta", callback_data=f"story_confirm:{track_id}"),
-                        InlineKeyboardButton("🔎 Não, buscar outra", callback_data="story_search_new")
-                    ]
-                ]
-
-                await update.message.reply_text(
-                    text=caption,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                    link_preview_options=LinkPreviewOptions(
-                        url=photo,
-                        show_above_text=True, 
-                        prefer_large_media=True
-                    ) if photo else LinkPreviewOptions(is_disabled=True)
-                )
-                return
+                await _send_unified_story_preview(update, track, context)
             else:
                 await update.message.reply_text("❌ Música não encontrada.")
-                return
+            return
 
-    text = (
-        f"🎶 <b>{BOT_DISPLAY_NAME}</b>\n"
-        f"🎧 Digite o nome de uma música ou use <code>{BOT_USERNAME} nome</code>\n\n"
-        f"📌 Comandos:\n"
-        f"/charts — suas músicas mais ouvidas\n"
-        f"/top — ranking global\n"
-        f"/play – enviar uma música pelo grupo\n"
-        f"/story — gerar story da música"
-    )
+    text = (f"🎶 <b>{BOT_DISPLAY_NAME}</b>\n" f"🎧 Digite o nome de uma música ou use <code>{BOT_USERNAME} nome</code>\n\n" f"📌 Comandos:\n" f"/charts — suas músicas mais ouvidas\n" f"/top — ranking global\n" f"/play – enviar uma música pelo grupo\n" f"/story — gerar story da música")
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 # =========================
@@ -1937,67 +1712,34 @@ def _format_track_button_text(track: Dict[str, Any]) -> str:
 def _build_track_keyboard_dynamic(tracks: List[Dict[str, Any]], query: str, offset: int = 0, limit: int = 5) -> List[List[InlineKeyboardButton]]:
     ranked = rank_tracks(query, tracks)
     total_tracks = len(ranked)
-    
-    # Pega apenas o segmento da página atual
     page_items = ranked[offset : offset + limit]
     keyboard: List[List[InlineKeyboardButton]] = []
-
-    # Botões das músicas
     for score, t in page_items:
         try:
             track_id = str(t["id"])
             remember_track(t)
-            keyboard.append([
-                InlineKeyboardButton(
-                    _format_track_button_text(t),
-                    callback_data=f"play:{track_id}"
-                )
-            ])
+            keyboard.append([InlineKeyboardButton(_format_track_button_text(t), callback_data=f"play:{track_id}")])
         except Exception as e:
             logger.warning("Erro montando botão: %s", e)
-
-    # Linha de Navegação (Voltar | Próximo)
     nav_buttons = []
-    
-    # Botão Voltar (só aparece se não estiver na primeira página)
-    if offset >= limit:
-        nav_buttons.append(InlineKeyboardButton("⬅️ Anterior", callback_data=f"nav:{offset - limit}:{query}"))
-    
-    # Botão Próximo (só aparece se ainda tiver mais músicas na lista)
-    if offset + limit < total_tracks:
-        nav_buttons.append(InlineKeyboardButton("Próximo ➡️", callback_data=f"nav:{offset + limit}:{query}"))
-
-    if nav_buttons:
-        keyboard.append(nav_buttons)
-
+    if offset >= limit: nav_buttons.append(InlineKeyboardButton("⬅️ Anterior", callback_data=f"nav:{offset - limit}:{query}"))
+    if offset + limit < total_tracks: nav_buttons.append(InlineKeyboardButton("Próximo ➡️", callback_data=f"nav:{offset + limit}:{query}"))
+    if nav_buttons: keyboard.append(nav_buttons)
     return keyboard
 
 
 async def navigation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cb = update.callback_query
     await cb.answer()
-
-    # Extrai o offset (página) e a pesquisa do botão clicado
     try:
         _, offset_str, query = cb.data.split(":", 2)
         offset = int(offset_str)
-    except ValueError:
-        return
-
+    except ValueError: return
     tracks = await deezer_search(query)
-    if not tracks:
-        return
-
+    if not tracks: return
     keyboard = _build_track_keyboard_dynamic(tracks, query, offset=offset)
-    
     page_num = (offset // 5) + 1
-    
-    # Edita a mensagem para mostrar a nova lista sem poluir o chat
-    await cb.edit_message_text(
-        f"🎧 Resultados para: <b>{esc(query)}</b>\n<i>Página {page_num}</i>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await cb.edit_message_text(f"🎧 Resultados para: <b>{esc(query)}</b>\n<i>Página {page_num}</i>", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2005,27 +1747,15 @@ async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not query:
         await update.message.reply_text("🎤 Digite o nome de uma música.")
         return
-
     tracks = await deezer_search(query)
-
     if tracks is None:
         await update.message.reply_text("⚠️ Erro ao acessar Deezer. Tente novamente.")
         return
-
     if not tracks:
         await update.message.reply_text("🔎 Nada encontrado.")
         return
-
     keyboard = _build_track_keyboard_dynamic(tracks, query, offset=0, limit=5)
-
-    if not keyboard:
-        await update.message.reply_text("🔎 Nada encontrado.")
-        return
-
-    await update.message.reply_text(
-        "🎧 Escolha:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await update.message.reply_text("🎧 Escolha:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 # =========================
 # NOVO: GRUPO EXCLUSIVO
@@ -2033,100 +1763,59 @@ async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def cleanup_pending(now: float) -> None:
     expired = [k for k, ts in PENDING_REPLIES.items() if now - ts > REPLY_TIMEOUT]
-    for k in expired:
-        PENDING_REPLIES.pop(k, None)
+    for k in expired: PENDING_REPLIES.pop(k, None)
 
 
 async def group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-    if not msg:
-        return
-
+    if not msg: return
     chat = update.effective_chat
     user = update.effective_user
-
-    if chat.type not in ["group", "supergroup"]:
-        return
-
+    if chat.type not in ["group", "supergroup"]: return
     key = (chat.id, user.id)
     now = time.time()
     cleanup_pending(now)
-
     text = (msg.text or "").strip()
-
     is_command = text.startswith("/play")
     is_mention = BOT_USERNAME.lower() in text.lower()
-
-    is_reply_to_bot = (
-        msg.reply_to_message
-        and msg.reply_to_message.from_user
-        and msg.reply_to_message.from_user.id == context.bot.id
-    )
-
+    is_reply_to_bot = (msg.reply_to_message and msg.reply_to_message.from_user and msg.reply_to_message.from_user.id == context.bot.id)
     if is_command or is_mention:
         PENDING_REPLIES[key] = now
-        await msg.reply_text(
-            "🎧Responda aqui o nome de uma música ou use "
-            f"{BOT_USERNAME} para pesquisar <i>inline</i>",
-            parse_mode=ParseMode.HTML
-        )
+        await msg.reply_text("🎧Responda aqui o nome de uma música ou use " f"{BOT_USERNAME} para pesquisar <i>inline</i>", parse_mode=ParseMode.HTML)
         return
-
     if is_reply_to_bot and key in PENDING_REPLIES:
         if now - PENDING_REPLIES[key] > REPLY_TIMEOUT:
             PENDING_REPLIES.pop(key, None)
             await msg.reply_text("⏱️ Tempo expirado. Use /play novamente.")
             return
-
         PENDING_REPLIES.pop(key, None)
         await search_music(update, context)
         return
-
-    return
 
 
 async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
     now = time.time()
-
     if chat.type in ["group", "supergroup"]:
         key = (chat.id, user.id)
         cleanup_pending(now)
         PENDING_REPLIES[key] = now
-
-        await update.message.reply_text(
-            "🎧Responda aqui o nome de uma música ou use "
-            f"{BOT_USERNAME} para pesquisar <i>inline</i>",
-            parse_mode=ParseMode.HTML
-        )
+        await update.message.reply_text("🎧Responda aqui o nome de uma música ou use " f"{BOT_USERNAME} para pesquisar <i>inline</i>", parse_mode=ParseMode.HTML)
         return
-
     query = " ".join(context.args).strip()
     if not query:
         await update.message.reply_text("🎤 Digite o nome de uma música.")
         return
-
     tracks = await deezer_search(query)
-
     if tracks is None:
         await update.message.reply_text("⚠️ Erro ao acessar Deezer. Tente novamente.")
         return
-
     if not tracks:
         await update.message.reply_text("🔎 Nada encontrado.")
         return
-
     keyboard = _build_track_keyboard_dynamic(tracks, query, offset=0, limit=5)
-
-    if not keyboard:
-        await update.message.reply_text("🔎 Nada encontrado.")
-        return
-
-    await update.message.reply_text(
-        "🎧 Escolha:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await update.message.reply_text("🎧 Escolha:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 # =========================
 # CLICK DO CHAT
@@ -2135,58 +1824,26 @@ async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cb = update.callback_query
     await cb.answer()
-
-    try:
-        track_id = cb.data.split(":", 1)[1]
-    except Exception:
-        await cb.answer("⚠️ Ação inválida.", show_alert=True)
-        return
-
-    try:
-        t = await resolve_track(track_id)
+    try: track_id = cb.data.split(":", 1)[1]
+    except Exception: return
+    try: t = await resolve_track(track_id)
     except Exception as e:
         logger.warning("Falha ao resolver track %s: %s", track_id, e)
         await cb.answer("🔄 Não foi possível carregar a música.", show_alert=True)
         return
-
     if not t or not t.get("id"):
         await cb.answer("🔄 Refaça a busca.", show_alert=True)
         return
-
     user = cb.from_user
     user_display = f"@{user.username}" if user.username else user.first_name
-
     count = register_play(user.id, t)
     photo = (t.get("album") or {}).get("cover_big") or ""
-
-    caption = build_caption(
-        title=t.get("title"),
-        artist=(t.get("artist") or {}).get("name"),
-        plays=count,
-        user_first_name=user_display,
-        cover_url=photo,
-        track_id=t.get("id"),
-    )
-
-    preview_url = photo
-
+    caption = build_caption(title=t.get("title"), artist=(t.get("artist") or {}).get("name"), plays=count, user_first_name=user_display, cover_url=photo, track_id=t.get("id"))
     try:
-        await cb.message.reply_text(
-            text=caption,
-            parse_mode=ParseMode.HTML,
-            link_preview_options=LinkPreviewOptions(
-                url=preview_url,
-                show_above_text=True, 
-                prefer_large_media=True
-            ) if photo else LinkPreviewOptions(is_disabled=True)
-        )
+        await cb.message.reply_text(text=caption, parse_mode=ParseMode.HTML, link_preview_options=LinkPreviewOptions(url=photo, show_above_text=True, prefer_large_media=True) if photo else LinkPreviewOptions(is_disabled=True))
     except Exception as e:
         logger.warning("Falha ao enviar música: %s", e)
-        await cb.message.reply_text(
-            text=caption,
-            parse_mode=ParseMode.HTML,
-            link_preview_options=LinkPreviewOptions(is_disabled=True)
-        )
+        await cb.message.reply_text(text=caption, parse_mode=ParseMode.HTML, link_preview_options=LinkPreviewOptions(is_disabled=True))
 
 # =========================
 # INLINE MODE
@@ -2194,17 +1851,12 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = (update.inline_query.query or "").strip()
-    if not query:
-        return
-
+    if not query: return
     user = update.inline_query.from_user
     tracks = await deezer_search(query)
-    if tracks is None:
-        return
-
+    if tracks is None: return
     results = []
     ranked = rank_tracks(query, tracks)
-
     for score, t in ranked[:10]:
         try:
             track_id = str(t["id"])
@@ -2213,181 +1865,75 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             album_name = sanitize((t.get("album") or {}).get("title") or "Desconhecido")
             cover_big = (t.get("album") or {}).get("cover_big")
             cover_small = (t.get("album") or {}).get("cover_small")
-
-            if not cover_big:
-                continue
-
+            if not cover_big: continue
             remember_track(t)
             current_count = get_play_count(user.id, track_id)
-
             user_display = f"@{user.username}" if user.username else user.first_name
+            caption = build_caption(title=title, artist=artist, plays=current_count, user_first_name=user_display, cover_url=cover_big, track_id=track_id)
+            results.append(InlineQueryResultArticle(id=f"track:{track_id}", title=f"🎵 {title}", description=f"{artist} — {album_name}", thumbnail_url=cover_small or cover_big, input_message_content=InputTextMessageContent(message_text=caption, parse_mode=ParseMode.HTML, link_preview_options=LinkPreviewOptions(url=cover_big, show_above_text=True, prefer_large_media=True) if cover_big else LinkPreviewOptions(is_disabled=True))))
+        except Exception as e: logger.warning("Erro inline item: %s", e)
+    await update.inline_query.answer(results, cache_time=2, is_personal=True)
 
-            caption = build_caption(
-                title=title,
-                artist=artist,
-                plays=current_count,
-                user_first_name=user_display,
-                cover_url=cover_big,
-                track_id=track_id,
-            )
-
-            results.append(
-                InlineQueryResultArticle(
-                    id=f"track:{track_id}",
-                    title=f"🎵 {title}",
-                    description=f"{artist} — {album_name}",
-                    thumbnail_url=cover_small or cover_big,
-                    input_message_content=InputTextMessageContent(
-                        message_text=caption,
-                        parse_mode=ParseMode.HTML,
-                        link_preview_options=LinkPreviewOptions(
-                            url=cover_big,
-                            show_above_text=True,
-                            prefer_large_media=True
-                        ) if cover_big else LinkPreviewOptions(is_disabled=True)
-                    )
-                )
-            )
-        except Exception as e:
-            logger.warning("Erro inline item: %s", e)
-
-    await update.inline_query.answer(
-        results,
-        cache_time=2,
-        is_personal=True
-    )
-
-# =========================
-# CHOSEN INLINE RESULT
-# =========================
 
 async def chosen_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not redis_client:
-        return
-
+    if not redis_client: return
     try:
         result_id = update.chosen_inline_result.result_id or ""
-        if not result_id.startswith("track:"):
-            return
-
+        if not result_id.startswith("track:"): return
         track_id = result_id.split(":", 1)[1]
         user_id = update.chosen_inline_result.from_user.id
-
         track = await resolve_track(track_id)
         if not track:
             meta = await fetch_track_meta(track_id)
-            track = {
-                "id": track_id,
-                "title": meta.get("title", "Unknown"),
-                "artist": {"name": meta.get("artist", "Unknown")},
-                "album": {
-                    "cover_big": meta.get("cover_big", ""),
-                    "cover_small": meta.get("cover_small", ""),
-                }
-            }
-
+            track = {"id": track_id, "title": meta.get("title", "Unknown"), "artist": {"name": meta.get("artist", "Unknown")}, "album": {"cover_big": meta.get("cover_big", ""), "cover_small": meta.get("cover_small", "")}}
         register_play(user_id, track)
-    except Exception as e:
-        logger.warning("Erro no chosen_inline: %s", e)
+    except Exception as e: logger.warning("Erro no chosen_inline: %s", e)
 
-# =========================
-# STATS (AGORA /CHARTS)
-# =========================
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not redis_client:
         await update.message.reply_text("⚠️ Redis indisponível.")
         return
-
     user = update.effective_user
     user_id = user.id
     user_display = f"@{user.username}" if user.username else user.first_name
-
-    entries: List[Tuple[str, float]] = redis_client.zrevrange(
-        f"top:user:{user_id}",
-        0,
-        9,
-        withscores=True
-    )
-
+    entries: List[Tuple[str, float]] = redis_client.zrevrange(f"top:user:{user_id}", 0, 9, withscores=True)
     if not entries:
         await update.message.reply_text("🎧 Você ainda não ouviu músicas.")
         return
-
     metas = await asyncio.gather(*(fetch_track_meta(_redis_text(track_id)) for track_id, _ in entries))
-
-    lines = [
-        f"📊 <b>Top10 de {esc(user_display or 'Usuário')} no {BOT_DISPLAY_NAME}</b>",
-        ""
-    ]
-
+    lines = [f"📊 <b>Top10 de {esc(user_display or 'Usuário')} no {BOT_DISPLAY_NAME}</b>", ""]
     for i, ((track_id, score), meta) in enumerate(zip(entries, metas), 1):
         title = sanitize(meta.get("title") or f"Track {track_id}")
         artist = sanitize(meta.get("artist") or "Unknown")
-
         lines.append(f"{i}. 🎧 <b>{esc(title)}</b>")
         lines.append(f"   🎤 <i>{esc(artist)}</i>")
         lines.append(f"   <i>🔁 {int(score)} Plays</i>")
         lines.append("")
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="\n".join(lines).strip(), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text="\n".join(lines).strip(),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True
-    )
-
-# =========================
-# TOP
-# =========================
 
 async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not redis_client:
         await update.message.reply_text("⚠️ Redis indisponível.")
         return
-
-    entries: List[Tuple[str, float]] = redis_client.zrevrange(
-        "top:tracks",
-        0,
-        9,
-        withscores=True
-    )
-
+    entries: List[Tuple[str, float]] = redis_client.zrevrange("top:tracks", 0, 9, withscores=True)
     if not entries:
         await update.message.reply_text("🎧 Ainda não há plays registrados.")
         return
-
     metas = await asyncio.gather(*(fetch_track_meta(_redis_text(track_id)) for track_id, _ in entries))
-
-    lines = [
-        f"📈 <b>Top10 global do {BOT_DISPLAY_NAME}</b>",
-        ""
-    ]
-
+    lines = [f"📈 <b>Top10 global do {BOT_DISPLAY_NAME}</b>", ""]
     for i, ((track_id, score), meta) in enumerate(zip(entries, metas), 1):
         title = sanitize(meta.get("title") or f"Track {track_id}")
         artist = sanitize(meta.get("artist") or "Unknown")
-
         lines.append(f"{i}. 🎧 <b>{esc(title)}</b>")
         lines.append(f"   🎤 <i>{esc(artist)}</i>")
         lines.append(f"   <i>🔁 {int(score)} Plays</i>")
         lines.append("")
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="\n".join(lines).strip(), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text="\n".join(lines).strip(),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True
-    )
-
-# =========================
-# /LOG
-# =========================
 
 def _chunk_text(text: str, limit: int = 3800) -> List[str]:
-    if len(text) <= limit:
-        return [text]
-
     parts = []
     start = 0
     while start < len(text):
@@ -2396,107 +1942,65 @@ def _chunk_text(text: str, limit: int = 3800) -> List[str]:
     return parts
 
 async def log_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_user or update.effective_user.id != ADMIN_ID:
-        return
-
+    if not update.effective_user or update.effective_user.id != ADMIN_ID: return
     lines = LOG_BUFFER[-40:]
     if not lines:
         await update.message.reply_text("Sem logs no buffer.")
         return
-
     payload = "<pre>" + html.escape("\n".join(lines)) + "</pre>"
-    for chunk in _chunk_text(payload, 3800):
-        await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+    for chunk in _chunk_text(payload, 3800): await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
 
-# =========================
-# TAREFAS AUTOMÁTICAS
-# =========================
 
 async def redis_backup_task():
     while True:
         await asyncio.sleep(86400)
         try:
-            if redis_client:
-                await backup_redis_to_disk()
-        except Exception as e:
-            logger.error("Falha no backup diário: %s", e)
+            if redis_client: await backup_redis_to_disk()
+        except Exception as e: logger.error("Falha no backup diário: %s", e)
 
 async def stats_export_task():
     while True:
         await asyncio.sleep(86400)
         try:
-            if redis_client:
-                await export_stats_to_disk()
-        except Exception as e:
-            logger.error("Falha no export diário de stats: %s", e)
+            if redis_client: await export_stats_to_disk()
+        except Exception as e: logger.error("Falha no export diário de stats: %s", e)
 
 async def redis_monitor_task():
     while True:
         await asyncio.sleep(3600)
         try:
-            if redis_client is None:
-                logger.warning("Redis desconectado, tentando reconectar...")
-                connect_redis()
-            else:
-                redis_client.ping()
-                logger.info("Monitor Redis: OK")
-        except Exception as e:
-            logger.warning("Monitor Redis detectou falha: %s", e)
-            connect_redis()
+            if redis_client is None: connect_redis()
+            else: redis_client.ping()
+        except Exception: connect_redis()
 
 async def post_init(application: Application):
-    if not acquire_instance_lock():
-        raise RuntimeError("Outra instância do bot já está rodando.")
-
+    if not acquire_instance_lock(): raise RuntimeError("Outra instância do bot já está rodando.")
     BACKGROUND_TASKS.clear()
     BACKGROUND_TASKS.append(asyncio.create_task(redis_backup_task()))
     BACKGROUND_TASKS.append(asyncio.create_task(stats_export_task()))
     BACKGROUND_TASKS.append(asyncio.create_task(redis_monitor_task()))
     BACKGROUND_TASKS.append(asyncio.create_task(instance_lock_renew_task()))
-    logger.info("Tarefas automáticas iniciadas")
 
 async def post_shutdown(application: Application):
-    for task in list(BACKGROUND_TASKS):
-        task.cancel()
-    if BACKGROUND_TASKS:
-        await asyncio.gather(*BACKGROUND_TASKS, return_exceptions=True)
-    BACKGROUND_TASKS.clear()
+    for task in list(BACKGROUND_TASKS): task.cancel()
+    if BACKGROUND_TASKS: await asyncio.gather(*BACKGROUND_TASKS, return_exceptions=True)
     release_instance_lock()
-
-# =========================
-# ERROS
-# =========================
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("ERRO não tratado: %s", context.error, exc_info=context.error)
 
-# =========================
-# MAIN
-# =========================
-
 def main():
-    if not TOKEN:
-        raise RuntimeError("TELEGRAM_TOKEN não definido")
-
-    app = (
-        Application.builder()
-        .token(TOKEN)
-        .post_init(post_init)
-        .post_shutdown(post_shutdown)
-        .build()
-    )
-
+    if not TOKEN: raise RuntimeError("TELEGRAM_TOKEN não definido")
+    app = Application.builder().token(TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("play", play))
     app.add_handler(CommandHandler("story", story_command))
     app.add_handler(CommandHandler("charts", stats))
     app.add_handler(CommandHandler("top", top))
     app.add_handler(CommandHandler("log", log_cmd))
-
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.REPLY & StoryReplyFilter(), story_reply_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS, group_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, search_music))
-
     app.add_handler(CallbackQueryHandler(story_confirm_callback, pattern=r"^story_confirm:"))
     app.add_handler(CallbackQueryHandler(story_search_new_callback, pattern=r"^story_search_new$"))
     app.add_handler(CallbackQueryHandler(story_theme_callback, pattern=r"^story_theme:"))
@@ -2504,16 +2008,12 @@ def main():
     app.add_handler(CallbackQueryHandler(story_navigation_callback, pattern=r"^story_nav:"))
     app.add_handler(CallbackQueryHandler(click, pattern=r"^play:"))
     app.add_handler(CallbackQueryHandler(navigation_callback, pattern=r"^nav:"))
-
     app.add_handler(InlineQueryHandler(inline_query))
     app.add_handler(ChosenInlineResultHandler(chosen_inline))
     app.add_error_handler(error_handler)
-
     logger.info("BOT ONLINE 🚀")
     app.run_polling()
 
-
 atexit.register(release_instance_lock)
-
 if __name__ == "__main__":
     main()
