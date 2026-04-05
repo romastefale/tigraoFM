@@ -343,9 +343,9 @@ def rank_tracks(query: str, tracks: List[Dict[str, Any]]) -> List[Tuple[float, D
 
     ranked.sort(
         key=lambda item: (
-            item[0],
-            int(item[1].get("rank") or 0),
-            normalize_text_basic(item[1].get("title") or ""),
+            item[0],                                          
+            int(item[1].get("rank") or 0),                    
+            normalize_text_basic(item[1].get("title") or ""), 
         ),
         reverse=True,
     )
@@ -433,6 +433,7 @@ def build_caption(
     if user_first_name:
         header = f"🎹 {esc(user_first_name)} está ouvindo...\n\n"
 
+    # Totalmente limpo, sem link invisível e sem link no título
     return (
         f"{header}"
         f"🎧 <b>{esc(title)}</b>\n"
@@ -1263,7 +1264,6 @@ async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     exact_track_id = None
     query_text = ""
 
-    # Verifica se o comando respondeu alguma mensagem (para tentar roubar o ID)
     if msg.reply_to_message:
         target_msg = msg.reply_to_message
         query_text = (target_msg.text or target_msg.caption or "").strip()
@@ -1273,7 +1273,6 @@ async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (target_msg.via_bot and target_msg.via_bot.id == context.bot.id)
         )
 
-        # Se respondeu o próprio bot, varre os links invisíveis atrás do ID
         if is_own_bot:
             entities = target_msg.caption_entities if target_msg.caption else target_msg.entities
             if entities:
@@ -1287,7 +1286,6 @@ async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ==========================================
     if is_group:
         bot_username = BOT_USERNAME.replace("@", "")
-        # Se achou ID, manda pra URL com ID. Se não, manda com "new"
         if exact_track_id:
             url = f"https://t.me/{bot_username}?start=story_{exact_track_id}"
         else:
@@ -1305,7 +1303,6 @@ async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # FLUXO SE JÁ ESTIVER NO PRIVADO
     # ==========================================
     
-    # Se tinha o track_id exato do deezer
     if exact_track_id:
         track = await resolve_track(exact_track_id)
         if track and track.get("id"):
@@ -1326,7 +1323,6 @@ async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    # Fallback textual para mensagens do bot sem link escondido (muito antigas)
     if (msg.reply_to_message and 
         (msg.reply_to_message.from_user.id == context.bot.id or (msg.reply_to_message.via_bot and msg.reply_to_message.via_bot.id == context.bot.id)) and 
         "🎧" in query_text and "🎤" in query_text):
@@ -1365,7 +1361,6 @@ async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     return
 
-    # Fallback de busca textual comum
     if query_text:
         normalized_query = normalize_query(query_text, 200)
         if normalized_query:
@@ -1403,7 +1398,6 @@ async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    # Se não respondeu nenhuma mensagem (tanto faz grupo ou privado)
     prompt = await msg.reply_text(
         "🎵 Responda esta mensagem com o nome da música para o Story.",
         parse_mode=ParseMode.HTML,
@@ -1689,12 +1683,10 @@ async def export_stats_to_disk() -> Optional[str]:
 # =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Verifica se o comando start veio com parâmetros do Deep Link (ex: start=story_12345)
     args = context.args
     if args and args[0].startswith("story_"):
         payload = args[0].replace("story_", "")
         
-        # Se veio sem música selecionada, inicia o fluxo do zero no privado
         if payload == "new":
             prompt = await update.message.reply_text(
                 "🎵 Envie o nome da música que você quer para o Story.",
@@ -1704,7 +1696,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _story_register_prompt(update.effective_chat.id, update.effective_user.id, prompt.message_id)
             return
             
-        # Se veio com um ID, já pula para a etapa de escolher o tema!
         else:
             track_id = payload
             track = await resolve_track(track_id)
@@ -1730,7 +1721,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("❌ Música não encontrada.")
                 return
 
-    # Mensagem de Start Padrão
     text = (
         f"🎶 <b>{BOT_DISPLAY_NAME}</b>\n"
         f"🎧 Digite o nome de uma música ou use <code>{BOT_USERNAME} nome</code>\n\n"
@@ -1929,7 +1919,7 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_display = f"@{user.username}" if user.username else user.first_name
 
     count = register_play(user.id, t)
-    photo = (t.get("album") or {}).get("cover_big")
+    photo = (t.get("album") or {}).get("cover_big") or ""
 
     caption = build_caption(
         title=t.get("title"),
@@ -1938,17 +1928,15 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_first_name=user_display,
     )
 
-    track_url = f"https://www.deezer.com/track/{t.get('id')}"
-
     try:
         await cb.message.reply_text(
             text=caption,
             parse_mode=ParseMode.HTML,
             link_preview_options=LinkPreviewOptions(
-                url=track_url,
+                url=photo, # Somente a URL da imagem! Isso força o Telegram a carregar a foto pura.
                 show_above_text=True, 
                 prefer_large_media=True
-            )
+            ) if photo else LinkPreviewOptions(is_disabled=True)
         )
     except Exception as e:
         logger.warning("Falha ao enviar música: %s", e)
@@ -1999,8 +1987,6 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_first_name=user_display,
             )
 
-            track_url = f"https://www.deezer.com/track/{track_id}"
-
             results.append(
                 InlineQueryResultArticle(
                     id=f"track:{track_id}",
@@ -2011,10 +1997,10 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         message_text=caption,
                         parse_mode=ParseMode.HTML,
                         link_preview_options=LinkPreviewOptions(
-                            url=track_url,
+                            url=cover_big, # Aponta o preview direto para a imagem pura!
                             show_above_text=True,
                             prefer_large_media=True
-                        )
+                        ) if cover_big else LinkPreviewOptions(is_disabled=True)
                     )
                 )
             )
@@ -2248,7 +2234,6 @@ def main():
     if not TOKEN:
         raise RuntimeError("TELEGRAM_TOKEN não definido")
 
-    # Correção: post_init e post_shutdown configurados no builder
     app = (
         Application.builder()
         .token(TOKEN)
@@ -2277,7 +2262,6 @@ def main():
     app.add_error_handler(error_handler)
 
     logger.info("BOT ONLINE 🚀")
-    # Correção: run_polling chamado sem argumentos
     app.run_polling()
 
 
