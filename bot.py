@@ -436,8 +436,9 @@ def build_caption(
     cover_url: Optional[str] = None,
     track_id: Optional[str] = None,
 ) -> str:
-    # Agrupamos os links invisíveis sem adicionar quebra de linha (\n)
     links = []
+    # Usamos uma técnica de colocar o link invisível 
+    # logo antes do primeiro emoji ou letra, mas com um separador seguro.
     if cover_url:
         safe_cover_url = html.escape(str(cover_url), quote=True)
         links.append(f"<a href='{safe_cover_url}'>&#8203;</a>")
@@ -448,13 +449,15 @@ def build_caption(
         
     link_str = "".join(links)
         
-    header = ""
     if user_first_name:
-        header = f"🎹 {esc(user_first_name)} está ouvindo...\n"
+        # Adicionamos o link_str colado no cabeçalho. 
+        # Sem quebra de linha extra antes do link, forçando o preview a ler o primeiro elemento.
+        header = f"{link_str}🎹 {esc(user_first_name)} está ouvindo...\n"
+    else:
+        header = f"{link_str}"
 
-    # O link_str fica grudado no início, totalmente invisível
     return (
-        f"{link_str}{header}"
+        f"{header}"
         f"🎧 <b>{esc(title)}</b>\n"
         f"🎤 <i>{esc(artist)}</i>\n"
         f"<i>🔁 {plays} Plays</i>"
