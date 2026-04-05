@@ -325,11 +325,6 @@ def score_track_match(query: str, track: Dict[str, Any]) -> float:
     elif track_id and q_norm and q_norm in track_id:
         score += 1.0
 
-    # ==========================================
-    # NOVO: BÔNUS DE POPULARIDADE (FAMA)
-    # ==========================================
-    # O rank do Deezer geralmente vai de 0 a ~1.000.000. 
-    # Adicionamos até 6.0 pontos na nota final se a música for um Hit global.
     track_rank = int(track.get("rank") or 0)
     rank_bonus = (track_rank / 1000000.0) * 6.0
     score += rank_bonus
@@ -346,12 +341,11 @@ def rank_tracks(query: str, tracks: List[Dict[str, Any]]) -> List[Tuple[float, D
         except Exception as e:
             logger.warning("Falha ao pontuar track: %s", e)
 
-    # Ordena combinando a precisão do texto com a popularidade
     ranked.sort(
         key=lambda item: (
-            item[0],                                          # 1º: Pontuação total (Texto exato + Bônus de Fama)
-            int(item[1].get("rank") or 0),                    # 2º: Desempate pela fama pura no Deezer
-            normalize_text_basic(item[1].get("title") or ""), # 3º: Desempate por ordem alfabética
+            item[0],
+            int(item[1].get("rank") or 0),
+            normalize_text_basic(item[1].get("title") or ""),
         ),
         reverse=True,
     )
@@ -1942,22 +1936,26 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         artist=(t.get("artist") or {}).get("name"),
         plays=count,
         user_first_name=user_display,
-        cover_url=photo,
-        track_id=t.get("id"),
     )
+
+    track_url = f"https://www.deezer.com/track/{t.get('id')}"
 
     try:
         await cb.message.reply_text(
             text=caption,
             parse_mode=ParseMode.HTML,
-            disable_web_page_preview=not bool(photo)
+            link_preview_options=LinkPreviewOptions(
+                url=track_url,
+                show_above_text=True, 
+                prefer_large_media=True
+            )
         )
     except Exception as e:
         logger.warning("Falha ao enviar música: %s", e)
         await cb.message.reply_text(
             text=caption,
             parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True
+            link_preview_options=LinkPreviewOptions(is_disabled=True)
         )
 
 # =========================
@@ -1999,9 +1997,9 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 artist=artist,
                 plays=current_count,
                 user_first_name=user_display,
-                cover_url=cover_big,
-                track_id=track_id,
             )
+
+            track_url = f"https://www.deezer.com/track/{track_id}"
 
             results.append(
                 InlineQueryResultArticle(
@@ -2012,7 +2010,11 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     input_message_content=InputTextMessageContent(
                         message_text=caption,
                         parse_mode=ParseMode.HTML,
-                        disable_web_page_preview=False
+                        link_preview_options=LinkPreviewOptions(
+                            url=track_url,
+                            show_above_text=True,
+                            prefer_large_media=True
+                        )
                     )
                 )
             )
