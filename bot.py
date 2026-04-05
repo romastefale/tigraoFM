@@ -1262,6 +1262,63 @@ async def story_fetch_cover(track: Dict[str, Any], query: Optional[str] = None) 
     return _make_placeholder_cover(track)
 
 
+def _build_story_keyboard_dynamic(tracks: List[Dict[str, Any]], query: str, offset: int = 0, limit: int = 5) -> List[List[InlineKeyboardButton]]:
+    ranked = rank_tracks(query, tracks)
+    total_tracks = len(ranked)
+    
+    page_items = ranked[offset : offset + limit]
+    keyboard: List[List[InlineKeyboardButton]] = []
+
+    for score, t in page_items:
+        try:
+            track_id = str(t["id"])
+            title = _truncate(t.get("title") or "Unknown", 30)
+            artist = _truncate((t.get("artist") or {}).get("name") or "Unknown", 30)
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"🎵 {title} — {artist}",
+                    callback_data=f"story_select:{track_id}"
+                )
+            ])
+        except Exception:
+            pass
+
+    nav_buttons = []
+    if offset >= limit:
+        nav_buttons.append(InlineKeyboardButton("⬅️ Anterior", callback_data=f"story_nav:{offset - limit}:{query}"))
+    if offset + limit < total_tracks:
+        nav_buttons.append(InlineKeyboardButton("Próximo ➡️", callback_data=f"story_nav:{offset + limit}:{query}"))
+
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+
+    return keyboard
+
+
+async def story_navigation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cb = update.callback_query
+    await cb.answer()
+
+    try:
+        _, offset_str, query = cb.data.split(":", 2)
+        offset = int(offset_str)
+    except ValueError:
+        return
+
+    tracks = await deezer_search(query)
+    if not tracks:
+        return
+
+    keyboard = _build_story_keyboard_dynamic(tracks, query, offset=offset)
+    page_num = (offset // 5) + 1
+    
+    await cb.edit_message_text(
+        f"🎧 Qual destas músicas você quer no seu Story?\n<i>Página {page_num}</i>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
 async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     chat = update.effective_chat
@@ -1383,19 +1440,7 @@ async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.reply_text("🔎 Nenhuma música encontrada com esse nome.")
                 return
 
-            ranked = rank_tracks(normalized_query, tracks)
-            keyboard = []
-            
-            for score, t in ranked[:5]:
-                track_id = str(t["id"])
-                t_title = _truncate(t.get("title") or "Unknown", 30)
-                t_artist = _truncate((t.get("artist") or {}).get("name") or "Unknown", 30)
-                keyboard.append([
-                    InlineKeyboardButton(
-                        f"🎵 {t_title} — {t_artist}",
-                        callback_data=f"story_select:{track_id}"
-                    )
-                ])
+            keyboard = _build_story_keyboard_dynamic(tracks, normalized_query, offset=0)
 
             if not keyboard:
                 await msg.reply_text("🔎 Nenhuma correspondência válida encontrada.")
@@ -1458,19 +1503,7 @@ async def story_reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await msg.reply_text("🔎 Nenhuma música encontrada com esse nome.")
         return
 
-    ranked = rank_tracks(normalized_query, tracks)
-    keyboard = []
-    
-    for score, t in ranked[:5]:
-        track_id = str(t["id"])
-        title = _truncate(t.get("title") or "Unknown", 30)
-        artist = _truncate((t.get("artist") or {}).get("name") or "Unknown", 30)
-        keyboard.append([
-            InlineKeyboardButton(
-                f"🎵 {title} — {artist}",
-                callback_data=f"story_select:{track_id}"
-            )
-        ])
+    keyboard = _build_story_keyboard_dynamic(tracks, normalized_query, offset=0)
 
     if not keyboard:
         await msg.reply_text("🔎 Nenhuma correspondência válida encontrada.")
@@ -2316,6 +2349,7 @@ def main():
 
     app.add_handler(CallbackQueryHandler(story_theme_callback, pattern=r"^story_theme:"))
     app.add_handler(CallbackQueryHandler(story_select_callback, pattern=r"^story_select:"))
+    app.add_handler(CallbackQueryHandler(story_navigation_callback, pattern=r"^story_nav:"))
     app.add_handler(CallbackQueryHandler(click, pattern=r"^play:"))
     app.add_handler(CallbackQueryHandler(navigation_callback, pattern=r"^nav:"))
 
