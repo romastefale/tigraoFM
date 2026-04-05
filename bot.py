@@ -1839,11 +1839,29 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     count = register_play(user.id, t)
     photo = (t.get("album") or {}).get("cover_big") or ""
     caption = build_caption(title=t.get("title"), artist=(t.get("artist") or {}).get("name"), plays=count, user_first_name=user_display, cover_url=photo, track_id=t.get("id"))
+    
+    # [MODIFICAÇÃO] Apaga o menu de botões para limpar o chat
     try:
-        await cb.message.reply_text(text=caption, parse_mode=ParseMode.HTML, link_preview_options=LinkPreviewOptions(url=photo, show_above_text=True, prefer_large_media=True) if photo else LinkPreviewOptions(is_disabled=True))
+        await cb.message.delete()
+    except Exception:
+        pass
+
+    try:
+        # Envia como nova mensagem para não herdar o link de resposta do menu apagado
+        await context.bot.send_message(
+            chat_id=cb.message.chat_id,
+            text=caption, 
+            parse_mode=ParseMode.HTML, 
+            link_preview_options=LinkPreviewOptions(url=photo, show_above_text=True, prefer_large_media=True) if photo else LinkPreviewOptions(is_disabled=True)
+        )
     except Exception as e:
         logger.warning("Falha ao enviar música: %s", e)
-        await cb.message.reply_text(text=caption, parse_mode=ParseMode.HTML, link_preview_options=LinkPreviewOptions(is_disabled=True))
+        await context.bot.send_message(
+            chat_id=cb.message.chat_id,
+            text=caption, 
+            parse_mode=ParseMode.HTML, 
+            link_preview_options=LinkPreviewOptions(is_disabled=True)
+        )
 
 # =========================
 # INLINE MODE
@@ -2017,4 +2035,3 @@ def main():
 atexit.register(release_instance_lock)
 if __name__ == "__main__":
     main()
-    
