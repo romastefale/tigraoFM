@@ -1417,20 +1417,38 @@ async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if exact_track_id:
         track = await resolve_track(exact_track_id)
         if track and track.get("id"):
-            t_title = _truncate(track.get("title") or "Unknown", 30)
-            t_artist = _truncate((track.get("artist") or {}).get("name") or "Unknown", 30)
+            user = update.effective_user
+            user_display = f"@{user.username}" if user.username else user.first_name
+            count = get_play_count(user.id, exact_track_id)
+            photo = (track.get("album") or {}).get("cover_big") or ""
+
+            base_caption = build_caption(
+                title=track.get("title"),
+                artist=(track.get("artist") or {}).get("name"),
+                plays=count,
+                user_first_name=user_display,
+                cover_url=photo,
+                track_id=track.get("id"),
+            )
+
+            caption = f"{base_caption}\n\n⚠️ <b>É essa música que você quer no Story?</b>"
 
             keyboard = [
                 [
-                    InlineKeyboardButton("Modo Claro ⚪️", callback_data=f"story_theme:light:{exact_track_id}"),
-                    InlineKeyboardButton("Modo Escuro ⚫️", callback_data=f"story_theme:dark:{exact_track_id}")
+                    InlineKeyboardButton("✅ Sim, é esta", callback_data=f"story_confirm:{exact_track_id}"),
+                    InlineKeyboardButton("🔎 Não, buscar outra", callback_data="story_search_new")
                 ]
             ]
 
             await msg.reply_text(
-                f"🎶 Música detectada: <b>{esc(t_title)} — {esc(t_artist)}</b>\n\n🎨 Escolha o tema do card para gerar a imagem:",
+                text=caption,
                 parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                link_preview_options=LinkPreviewOptions(
+                    url=photo,
+                    show_above_text=True, 
+                    prefer_large_media=True
+                ) if photo else LinkPreviewOptions(is_disabled=True)
             )
             return
 
@@ -1444,20 +1462,39 @@ async def story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if ranked:
                 _, best_track = ranked[0]
                 track_id = str(best_track["id"])
-                t_title = _truncate(best_track.get("title") or "Unknown", 30)
-                t_artist = _truncate((best_track.get("artist") or {}).get("name") or "Unknown", 30)
+                
+                user = update.effective_user
+                user_display = f"@{user.username}" if user.username else user.first_name
+                count = get_play_count(user.id, track_id)
+                photo = (best_track.get("album") or {}).get("cover_big") or ""
+
+                base_caption = build_caption(
+                    title=best_track.get("title"),
+                    artist=(best_track.get("artist") or {}).get("name"),
+                    plays=count,
+                    user_first_name=user_display,
+                    cover_url=photo,
+                    track_id=track_id,
+                )
+
+                caption = f"{base_caption}\n\n⚠️ <b>É essa música que você quer no Story?</b>"
 
                 keyboard = [
                     [
-                        InlineKeyboardButton("Modo Claro ⚪️", callback_data=f"story_theme:light:{track_id}"),
-                        InlineKeyboardButton("Modo Escuro ⚫️", callback_data=f"story_theme:dark:{track_id}")
+                        InlineKeyboardButton("✅ Sim, é esta", callback_data=f"story_confirm:{track_id}"),
+                        InlineKeyboardButton("🔎 Não, buscar outra", callback_data="story_search_new")
                     ]
                 ]
 
                 await msg.reply_text(
-                    f"🎶 Música detectada: <b>{esc(t_title)} — {esc(t_artist)}</b>\n\n🎨 Escolha o tema do card para gerar a imagem:",
+                    text=caption,
                     parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup(keyboard)
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    link_preview_options=LinkPreviewOptions(
+                        url=photo,
+                        show_above_text=True, 
+                        prefer_large_media=True
+                    ) if photo else LinkPreviewOptions(is_disabled=True)
                 )
                 return
 
@@ -1564,8 +1601,52 @@ async def story_select_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await cb.edit_message_text("❌ Música não encontrada ou indisponível.")
         return
 
-    title = _truncate(track.get("title") or "Unknown", 30)
-    artist = _truncate((track.get("artist") or {}).get("name") or "Unknown", 30)
+    user = update.effective_user
+    user_display = f"@{user.username}" if user.username else user.first_name
+    count = get_play_count(user.id, track_id)
+    photo = (track.get("album") or {}).get("cover_big") or ""
+
+    base_caption = build_caption(
+        title=track.get("title"),
+        artist=(track.get("artist") or {}).get("name"),
+        plays=count,
+        user_first_name=user_display,
+        cover_url=photo,
+        track_id=track.get("id"),
+    )
+
+    caption = f"{base_caption}\n\n⚠️ <b>É essa música que você quer no Story?</b>"
+
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Sim, é esta", callback_data=f"story_confirm:{track_id}"),
+            InlineKeyboardButton("🔎 Não, buscar outra", callback_data="story_search_new")
+        ]
+    ]
+
+    await cb.edit_message_text(
+        text=caption,
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        link_preview_options=LinkPreviewOptions(
+            url=photo,
+            show_above_text=True, 
+            prefer_large_media=True
+        ) if photo else LinkPreviewOptions(is_disabled=True)
+    )
+
+
+# ==========================================
+# NOVOS CALLBACKS: CONFIRMAÇÃO DO STORY
+# ==========================================
+async def story_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cb = update.callback_query
+    await cb.answer()
+
+    try:
+        _, track_id = cb.data.split(":", 1)
+    except ValueError:
+        return
 
     keyboard = [
         [
@@ -1573,12 +1654,28 @@ async def story_select_callback(update: Update, context: ContextTypes.DEFAULT_TY
             InlineKeyboardButton("Modo Escuro ⚫️", callback_data=f"story_theme:dark:{track_id}")
         ]
     ]
+    await cb.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
 
-    await cb.edit_message_text(
-        f"🎶 Música escolhida: <b>{esc(title)} — {esc(artist)}</b>\n\n🎨 Escolha o tema do card para gerar a imagem:",
+
+async def story_search_new_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cb = update.callback_query
+    await cb.answer()
+    
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    try:
+        await cb.message.delete()
+    except Exception:
+        pass
+
+    prompt = await context.bot.send_message(
+        chat_id=chat_id,
+        text="🎵 Responda esta mensagem com o nome da música para o Story.",
         parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=ForceReply(selective=True),
     )
+    _story_register_prompt(chat_id, user_id, prompt.message_id)
 
 
 async def story_theme_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1778,20 +1875,38 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             track = await resolve_track(track_id)
             
             if track and track.get("id"):
-                t_title = _truncate(track.get("title") or "Unknown", 30)
-                t_artist = _truncate((track.get("artist") or {}).get("name") or "Unknown", 30)
+                user = update.effective_user
+                user_display = f"@{user.username}" if user.username else user.first_name
+                count = get_play_count(user.id, track_id)
+                photo = (track.get("album") or {}).get("cover_big") or ""
+
+                base_caption = build_caption(
+                    title=track.get("title"),
+                    artist=(track.get("artist") or {}).get("name"),
+                    plays=count,
+                    user_first_name=user_display,
+                    cover_url=photo,
+                    track_id=track.get("id"),
+                )
+
+                caption = f"{base_caption}\n\n⚠️ <b>É essa música que você quer no Story?</b>"
 
                 keyboard = [
                     [
-                        InlineKeyboardButton("Modo Claro ⚪️", callback_data=f"story_theme:light:{track_id}"),
-                        InlineKeyboardButton("Modo Escuro ⚫️", callback_data=f"story_theme:dark:{track_id}")
+                        InlineKeyboardButton("✅ Sim, é esta", callback_data=f"story_confirm:{track_id}"),
+                        InlineKeyboardButton("🔎 Não, buscar outra", callback_data="story_search_new")
                     ]
                 ]
 
                 await update.message.reply_text(
-                    f"🎶 Música escolhida: <b>{esc(t_title)} — {esc(t_artist)}</b>\n\n🎨 Escolha o tema do card para gerar a imagem:",
+                    text=caption,
                     parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup(keyboard)
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    link_preview_options=LinkPreviewOptions(
+                        url=photo,
+                        show_above_text=True, 
+                        prefer_large_media=True
+                    ) if photo else LinkPreviewOptions(is_disabled=True)
                 )
                 return
             else:
@@ -2382,6 +2497,8 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS, group_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, search_music))
 
+    app.add_handler(CallbackQueryHandler(story_confirm_callback, pattern=r"^story_confirm:"))
+    app.add_handler(CallbackQueryHandler(story_search_new_callback, pattern=r"^story_search_new$"))
     app.add_handler(CallbackQueryHandler(story_theme_callback, pattern=r"^story_theme:"))
     app.add_handler(CallbackQueryHandler(story_select_callback, pattern=r"^story_select:"))
     app.add_handler(CallbackQueryHandler(story_navigation_callback, pattern=r"^story_nav:"))
