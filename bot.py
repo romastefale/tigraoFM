@@ -452,7 +452,7 @@ def build_caption(
         f"{header}"
         f"{title_line}\n"
         f"🎤 <i>{esc(artist)}</i>\n"
-        f"<i>🔁 {plays} Plays</i>"
+        f"🔁 {plays} <u>Plays</u>"
         f"{hidden_link}"
     )
 
@@ -1908,7 +1908,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         artist = sanitize(meta.get("artist") or "Unknown")
         lines.append(f"{i}. 🎧 <b>{esc(title)}</b>")
         lines.append(f"   🎤 <i>{esc(artist)}</i>")
-        lines.append(f"   <i>🔁 {int(score)} Plays</i>")
+        lines.append(f"   🔁 {int(score)} <u>Plays</u>")
         lines.append("")
     await context.bot.send_message(chat_id=update.effective_chat.id, text="\n".join(lines).strip(), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
@@ -1928,7 +1928,7 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
         artist = sanitize(meta.get("artist") or "Unknown")
         lines.append(f"{i}. 🎧 <b>{esc(title)}</b>")
         lines.append(f"   🎤 <i>{esc(artist)}</i>")
-        lines.append(f"   <i>🔁 {int(score)} Plays</i>")
+        lines.append(f"   🔁 {int(score)} <u>Plays</u>")
         lines.append("")
     await context.bot.send_message(chat_id=update.effective_chat.id, text="\n".join(lines).strip(), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
