@@ -1742,7 +1742,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"/charts — suas músicas mais ouvidas\n"
         f"/top — ranking global\n"
         f"/play – enviar uma música pelo grupo\n"
-        f"/story — gerar story 9:16 da música"
+        f"/story — gerar story da música"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -2094,7 +2094,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     metas = await asyncio.gather(*(fetch_track_meta(_redis_text(track_id)) for track_id, _ in entries))
 
     lines = [
-        f"📊 <b>Músicas mais ouvidas de {esc(user_display or 'Usuário')} no {BOT_DISPLAY_NAME}</b>",
+        f"📊 <b>Top10 de {esc(user_display or 'Usuário')} no {BOT_DISPLAY_NAME}</b>",
         ""
     ]
 
@@ -2137,7 +2137,7 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     metas = await asyncio.gather(*(fetch_track_meta(_redis_text(track_id)) for track_id, _ in entries))
 
     lines = [
-        f"📈 <b>Top global do {BOT_DISPLAY_NAME}</b>",
+        f"📈 <b>Top10 global do {BOT_DISPLAY_NAME}</b>",
         ""
     ]
 
