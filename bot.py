@@ -19,6 +19,7 @@ from telegram import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     InlineQueryResultPhoto,
+    LinkPreviewOptions,
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -220,16 +221,13 @@ def _render_story_image(track: Dict[str, Any]) -> Optional[bytes]:
 # HELPERS DE LAYOUT
 # =========================
 
-def build_caption(title: Any, artist: Any, plays: int, user_first_name: Optional[str] = None, track_link: Optional[str] = None) -> str:
+def build_caption(title: Any, artist: Any, plays: int, user_first_name: Optional[str] = None) -> str:
     header = ""
     if user_first_name:
-        header = f"🎹 {esc(user_first_name)} está ouvindo...\n"
-
-    invisible_link = f'<a href="{track_link}">&#8203;</a>' if track_link else ""
+        header = f"🎹 {esc(user_first_name)} está ouvindo...\n\n"
 
     return (
         f"{header}"
-        f"{invisible_link}"
         f"🎧 <b>{esc(title)}</b>\n"
         f"🎤 <i>{esc(artist)}</i>\n"
         f"<i>🔁 {plays} Plays</i>"
@@ -632,7 +630,6 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await cb.answer()
 
     try:
-        # Pega a ação e o id no botão que foi clicado
         data_parts = cb.data.split(":", 1)
         if len(data_parts) == 2:
             action, track_id = data_parts
@@ -663,26 +660,23 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         title=t.get("title"),
         artist=(t.get("artist") or {}).get("name"),
         plays=count,
-        user_first_name=cb.from_user.first_name,
-        track_link=f"https://www.deezer.com/track/{t.get('id')}"
+        user_first_name=cb.from_user.first_name
     )
-
-    photo = (t.get("album") or {}).get("cover_big")
+    
+    # URL usada para o link preview
+    track_url = f"https://www.deezer.com/track/{t.get('id')}"
 
     try:
-        # Envio principal sempre acontece
-        if photo:
-            await cb.message.reply_photo(
-                photo=photo,
-                caption=caption,
-                parse_mode=ParseMode.HTML
+        # Envio principal usando LinkPreviewOptions: Capa grande, acima do texto e clicável.
+        await cb.message.reply_text(
+            text=caption,
+            parse_mode=ParseMode.HTML,
+            link_preview_options=LinkPreviewOptions(
+                url=track_url,
+                show_above_text=True, 
+                prefer_large_media=True
             )
-        else:
-            await cb.message.reply_text(
-                caption,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True
-            )
+        )
 
         # Processamento blindado do Story
         if action == "story":
@@ -707,9 +701,9 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.warning("Falha ao enviar publicação: %s", e)
         await cb.message.reply_text(
-            caption,
+            text=caption,
             parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True
+            link_preview_options=LinkPreviewOptions(is_disabled=True)
         )
 
 # =========================
@@ -749,8 +743,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         title=title,
                         artist=artist,
                         plays=current_count,
-                        user_first_name=user.first_name,
-                        track_link=f"https://www.deezer.com/track/{track_id}"
+                        user_first_name=user.first_name
                     ),
                     parse_mode=ParseMode.HTML,
                     title=f"{title} — {artist}",
@@ -841,7 +834,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id=update.effective_chat.id,
         text="\n".join(lines).strip(),
         parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True
+        link_preview_options=LinkPreviewOptions(is_disabled=True)
     )
 
 # =========================
@@ -884,7 +877,7 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id=update.effective_chat.id,
         text="\n".join(lines).strip(),
         parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True
+        link_preview_options=LinkPreviewOptions(is_disabled=True)
     )
 
 # =========================
