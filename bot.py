@@ -220,13 +220,16 @@ def _render_story_image(track: Dict[str, Any]) -> Optional[bytes]:
 # HELPERS DE LAYOUT
 # =========================
 
-def build_caption(title: Any, artist: Any, plays: int, user_first_name: Optional[str] = None) -> str:
+def build_caption(title: Any, artist: Any, plays: int, user_first_name: Optional[str] = None, track_link: Optional[str] = None) -> str:
     header = ""
     if user_first_name:
         header = f"🎹 {esc(user_first_name)} está ouvindo...\n"
 
+    invisible_link = f'<a href="{track_link}">&#8203;</a>' if track_link else ""
+
     return (
         f"{header}"
+        f"{invisible_link}"
         f"🎧 <b>{esc(title)}</b>\n"
         f"🎤 <i>{esc(artist)}</i>\n"
         f"<i>🔁 {plays} Plays</i>"
@@ -661,6 +664,7 @@ async def click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         artist=(t.get("artist") or {}).get("name"),
         plays=count,
         user_first_name=cb.from_user.first_name,
+        track_link=f"https://www.deezer.com/track/{t.get('id')}"
     )
 
     photo = (t.get("album") or {}).get("cover_big")
@@ -746,6 +750,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         artist=artist,
                         plays=current_count,
                         user_first_name=user.first_name,
+                        track_link=f"https://www.deezer.com/track/{track_id}"
                     ),
                     parse_mode=ParseMode.HTML,
                     title=f"{title} — {artist}",
@@ -994,4 +999,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
