@@ -1328,52 +1328,31 @@ async def story_navigation_callback(update: Update, context: ContextTypes.DEFAUL
 # ==========================================
 # NOVA FUNÇÃO DE EXTRAÇÃO MODULAR
 # ==========================================
-def try_extract_music_context(reply_to_message: Message, bot_id: int) -> dict:
+def try_extract_music_context(message: Message, bot_id: int) -> dict:
     """
-    Tenta extrair o ID ou nome da música silenciosamente a partir de uma mensagem respondida.
-    Retorna um dicionário com track_id, query e is_bot_text.
+    Tenta extrair o ID ou nome da música silenciosamente a partir de uma mensagem.
+    Focada em detectar o link invisível gerado pelo bot.
     """
     result = {"track_id": None, "query": None, "is_bot_text": False}
     
-    if not reply_to_message:
+    if not message:
         return result
 
     try:
-        text_content = (reply_to_message.text or reply_to_message.caption or "").strip()
-        is_own_bot = (
-            (reply_to_message.from_user and reply_to_message.from_user.id == bot_id) or
-            (reply_to_message.via_bot and reply_to_message.via_bot.id == bot_id)
-        )
+        # Busca nas entidades do texto ou da legenda (foto/vídeo)
+        entities = message.entities or message.caption_entities
+        if entities:
+            for ent in entities:
+                if ent.type == "text_link" and ent.url and "deezer.com/track/" in ent.url:
+                    # Extrai o ID da música da URL do Deezer usada no link invisível \u200b
+                    result["track_id"] = ent.url.split("deezer.com/track/")[-1].split("?")[0].strip("/")
+                    return result
 
-        # 1. Tenta achar o Link Invisível (ID Exato) - Apenas se for do bot
-        if is_own_bot:
-            entities = reply_to_message.caption_entities if reply_to_message.caption else reply_to_message.entities
-            if entities:
-                for ent in entities:
-                    if ent.type == "text_link" and ent.url and "deezer.com/track/" in ent.url:
-                        result["track_id"] = ent.url.split("deezer.com/track/")[-1].split("?")[0].strip("/")
-                        return result
-
-        # 2. Tenta ler o texto entre os emojis (Fallback do Bot)
-        if is_own_bot and "🎧" in text_content and "🎤" in text_content:
-            title, artist = "", ""
-            for line in text_content.split('\n'):
-                if "🎧" in line:
-                    title = line.replace("🎧", "").strip()
-                elif "🎤" in line:
-                    artist = line.replace("🎤", "").strip()
-            
-            if title or artist:
-                result["query"] = f"{title} {artist}".strip()
-                result["is_bot_text"] = True
-                return result
-
-        # 3. Se for resposta a um usuário comum, apenas pega o texto dele
-        if not is_own_bot and text_content:
-            result["query"] = text_content
+        # Fallback textual básico
+        text_content = (message.text or message.caption or "").strip()
+        result["query"] = text_content
 
     except Exception:
-        # Em caso de qualquer erro estrutural da mensagem, ignora para não travar o bot
         pass
 
     return result
@@ -1758,6 +1737,49 @@ async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🎧 Escolha:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 # =========================
+# LÓGICA DE MENSAGEM PRIVADA (Diferencia busca de reuso de post)
+# =========================
+
+async def private_message_logic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg or not update.effective_user:
+        return
+
+    # Tenta extrair o track_id (funciona para mensagens encaminhadas ou respondidas)
+    extracted = try_extract_music_context(msg, context.bot.id)
+    track_id = extracted.get("track_id")
+
+    # CENÁRIO A: É UMA MENSAGEM DO BOT (Reconhecida pelo link invisível)
+    if track_id:
+        track = await resolve_track(track_id)
+        if track and track.get("id"):
+            title = track.get("title")
+            artist = (track.get("artist") or {}).get("name")
+
+            keyboard = [
+                [
+                    InlineKeyboardButton("📝 Postar esta música", callback_data=f"play:{track_id}"),
+                    InlineKeyboardButton("🖼️ Fazer Story", callback_data=f"story_select:{track_id}")
+                ],
+                [
+                    InlineKeyboardButton("🔙 Voltar para busca", callback_data="story_search_new")
+                ]
+            ]
+
+            await msg.reply_text(
+                f"🤖 <b>Post do bot detectado!</b>\n"
+                f"Música: <b>{esc(title)} — {esc(artist)}</b>\n\n"
+                "O que você deseja fazer?",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.HTML
+            )
+            return
+
+    # CENÁRIO B: COMPORTAMENTO ATUAL (Busca de texto comum)
+    await search_music(update, context)
+
+
+# =========================
 # NOVO: GRUPO EXCLUSIVO
 # =========================
 
@@ -2018,7 +2040,10 @@ def main():
     app.add_handler(CommandHandler("log", log_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.REPLY & StoryReplyFilter(), story_reply_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS, group_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, search_music))
+    
+    # [MODIFICAÇÃO] Handler unificado de mensagens privadas para reconhecimento automático
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, private_message_logic))
+    
     app.add_handler(CallbackQueryHandler(story_confirm_callback, pattern=r"^story_confirm:"))
     app.add_handler(CallbackQueryHandler(story_search_new_callback, pattern=r"^story_search_new$"))
     app.add_handler(CallbackQueryHandler(story_theme_callback, pattern=r"^story_theme:"))
